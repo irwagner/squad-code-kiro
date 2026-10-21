@@ -1,6 +1,6 @@
 # Templates de operação
 
-Blueprints prontos para começar uma operação no SQUAD/CODE. Crie uma **Nova operação**, escolha a squad e **cole o briefing/visão/escopo** abaixo; cada etapa roda com o agente `.kiro/agents` indicado. Dica: ligue **Worktree isolada por etapa** (isola cada feature num branch `squad/<id>`) e, para pentest, mantenha o escopo em `engagements/<nome>/scope.md`.
+Blueprints prontos para começar uma operação no SQUAD/CODE. Ao criar uma **Nova operação**, escolha um **template** no passo 1 (Em branco, Sistema, SaaS, Lab ou Pentest) e o briefing/visão/escopo já vêm pré-preenchidos (edite à vontade). As descrições detalhadas de cada um estão abaixo; cada etapa roda com o agente `.kiro/agents` indicado. Dica: ligue **Worktree isolada por etapa** (isola cada feature num branch `squad/<id>`) e, para pentest, mantenha o escopo em `engagements/<nome>/scope.md`.
 
 Modelos sugeridos (créditos): dia a dia `auto` (1x) ou `claude-sonnet-4.5` (1,3x); planejamento/arquitetura `claude-opus-4.5` (2,2x); tarefas simples `claude-haiku-4.5` (0,4x). Liste todos com `kiro-cli chat --list-models`.
 

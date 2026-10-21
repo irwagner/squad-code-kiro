@@ -11429,16 +11429,23 @@ function openProjectEditor(projectId){
 function blankProject(sq){return{id:id('project'),code:'OP-'+String(state.projects.length+1).padStart(3,'0'),name:'',briefing:'',vision:'',scopeIn:'',scopeOut:'',glossary:'',architecture:'',adrs:[],squadId:sq?.id||'',commanderId:sq?.commanderId||'',agentIds:[...(sq?.agentIds||[])],sprints:[],features:[],logs:[],handoffs:[],createdAt:nowISO()};}
 /* Nova operação: a two-step wizard (name, then an existing squad or a new one built in the Squad Studio). The operation is created
    right away with an empty briefing; projectGaps/runGate keep it from running until the project is complete. */
+const OP_TEMPLATES={
+ '':{label:'Em branco'},
+ system:{label:'Sistema / app',briefing:'Construir <nome do sistema>: descreva o que faz e para quem. Stack a definir. Entregar um fluxo de ponta a ponta funcionando, com testes.',vision:'Objetivo do produto e metas da 1ª entrega (MVP enxuto): o usuário consegue <ação principal> de ponta a ponta.',scopeIn:'Autenticação\nModelo de dados e migrações\nAPI do domínio (CRUD)\nUI principal com estados de erro/carregamento\nTestes e CI',scopeOut:'Funcionalidades avançadas e integrações fora do MVP.'},
+ saas:{label:'SaaS (multi-tenant)',briefing:'SaaS <nome> para <público>. Multi-tenant, autenticação, cobrança por assinatura e limites de uso por plano.',vision:'Clientes assinam, criam sua conta (tenant), convidam o time e usam o núcleo do produto; cobrança recorrente e limites por plano.',scopeIn:'Isolamento de tenants\nAuth + convites/papéis\nBilling (planos + webhook de pagamento)\nLimites/quotas por plano\nPainel do tenant\nTestes de isolamento entre tenants',scopeOut:'White-label, SSO empresarial e data residency (fases seguintes).'},
+ lab:{label:'Lab (ambiente descartável)',briefing:'Lab reprodutível de <tema>. Um comando para subir e um para destruir; só dados sintéticos; isolado do host e sem exposição à internet por padrão.',vision:'Ambiente efêmero para estudo/teste/treino, reconstruível do zero, sem credenciais reais.',scopeIn:'Containers/compose\nSeeds sintéticos\nServiços de apoio\nScripts up/down\nREADME do lab (subir/usar/destruir)',scopeOut:'Qualquer dado real ou acesso a produção.'},
+ pentest:{label:'Pentest (alvo autorizado)',briefing:'Pentest AUTORIZADO de <alvo>. Escopo e janela em engagements/<nome>/scope.md. Encontrar, validar e reportar vulnerabilidades com PoC mínima e recomendações. Exploração ativa só em ambiente isolado.',vision:'Equipe que faz recon → análise → exploração controlada → relatório, priorizando risco e correção, sem ações destrutivas e dentro do escopo.',scopeIn:'Recon (superfície de ataque)\nAnálise de vulnerabilidades (SAST/scanners)\nExploração com PoC mínima (sandbox)\nValidação dos achados\nRelatório (engagements/<nome>/report.md)',scopeOut:'DoS, exfiltração real, persistência e qualquer alvo fora do escopo.'},
+};
 const opNewSub=step=>`${'OP-'+String(state.projects.length+1).padStart(3,'0')} / ${step}`;
 function openOpNew(name=''){
  if(!guardMutation())return;if(state.projects.length>=30)return toast('Limite de 30 projetos por workspace.','error');
  ui.opNew={name};
- showModal('NOVA <span class="word-tag">OPERAÇÃO</span>',opNewSub('1 DE 2 · NOME'),`<form id="opNewForm" novalidate><div class="field"><label for="opNewName">NOME DO PROJETO</label><input id="opNewName" name="name" value="${E(name)}" maxlength="70" placeholder="Ex.: Atlas Commerce" autocomplete="off" autofocus></div><p class="hint">Depois você escolhe a squad que vai executar a operação.</p></form>`,`${cancelButton}<button class="btn primary" type="submit" form="opNewForm">${icon('arrow')}Continuar</button>`,'narrow','op-new');
+ showModal('NOVA <span class="word-tag">OPERAÇÃO</span>',opNewSub('1 DE 2 · NOME'),`<form id="opNewForm" novalidate><div class="field"><label for="opNewName">NOME DO PROJETO</label><input id="opNewName" name="name" value="${E(name)}" maxlength="70" placeholder="Ex.: Atlas Commerce" autocomplete="off" autofocus></div><div class="field"><label for="opNewTpl">TEMPLATE (OPCIONAL)</label><select id="opNewTpl" name="template">${Object.entries(OP_TEMPLATES).map(([k,v])=>`<option value="${k}" ${(ui.opNew?.template||'')===k?'selected':''}>${E(v.label)}</option>`).join('')}</select><span class="hint">Pré-preenche briefing, visão e escopo (edite depois).</span></div><p class="hint">Depois você escolhe a squad que vai executar a operação.</p></form>`,`${cancelButton}<button class="btn primary" type="submit" form="opNewForm">${icon('arrow')}Continuar</button>`,'narrow','op-new');
 }
 function opNewNext(form){
- const name=String(new FormData(form).get('name')||'').trim().replace(/\s+/g,' ').slice(0,70);
+ const d=new FormData(form),name=String(d.get('name')||'').trim().replace(/\s+/g,' ').slice(0,70);
  if(!name){$('#opNewName')?.focus();return toast('Informe o nome do projeto.','error');}
- ui.opNew={name};opNewSquadStep();
+ ui.opNew={name,template:String(d.get('template')||'')};opNewSquadStep();
 }
 function opNewSquadStep(){
  if(!ui.opNew?.name)return openOpNew();const ready=state.squads.filter(q=>!squadMissing(q,false).length).length,full=state.squads.length>=30;
@@ -11460,9 +11467,9 @@ function opNewNewSquad(){
  if(!ui.squadDraft?.isNew){ui.opPending=null;return;}
  toast(`Monte a squad de ${name}. Ao criar a squad, a operação é criada com ela.`);
 }
-function createOperation(name,sq,msg){
+function createOperation(name,sq,msg,template){
  if(!guardMutation())return;ui.opPending=null;if(!name||!sq)return;if(state.projects.length>=30)return toast('Limite de 30 projetos por workspace.','error');
- const p=blankProject(sq);p.name=name;applySquad(p,sq);p.folder=projectFolderName(p,state.projects.map(x=>x.folder));p.sprints=[createSprint(1)];ensureSetup(p);state.projects.push(p);
+ const p=blankProject(sq);p.name=name;const _t=OP_TEMPLATES[template||ui.opNew?.template||''];if(_t&&_t.briefing){p.briefing=_t.briefing;p.vision=_t.vision||'';p.scopeIn=_t.scopeIn||'';p.scopeOut=_t.scopeOut||'';}applySquad(p,sq);p.folder=projectFolderName(p,state.projects.map(x=>x.folder));p.sprints=[createSprint(1)];ensureSetup(p);state.projects.push(p);
  state.projectId=p.id;ui.selectedId=p.commanderId;ui.opsNew=null;ui.opNew=null;ui.opsFeature=null;ui.opsFeatureDraft=null;ui.opsPlan=null;
  log(`Operação ${p.name} criada com a squad ${sq.name}.`,'system',null,p);save();if(ui.modal)closeModal();ui.view='projects';render();$('#projectBriefing')?.focus();
  toast(msg||'Operação criada com o setup do projeto na Sprint 01. Escreva o briefing ou abra o Agent Teams para co-escrever com a squad.');

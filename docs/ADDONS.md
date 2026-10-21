@@ -62,8 +62,8 @@ Não existe `--sandbox` nativo no `kiro-cli chat` (só `--cloud`, que roda na nu
 
 Itens de alto valor ainda não implementados, com o motivo (para continuar com segurança quando possível):
 
-- **Paralelismo real na UI** (disparar várias features em worktrees ao mesmo tempo): o isolamento por worktree já existe; falta reescrever a orquestração do sprint (hoje sequencial) para um pool concorrente com N streams. É mudança estrutural na orquestração densa da UI (`app.js`) e **não dá para verificar sem o navegador** — melhor fazer com você conseguindo testar na interface.
-- **Templates de operação no fluxo de criação** (pré-preencher briefing/features ao criar): o fluxo "Nova operação" é um modal multi-etapa + mapa 3D; mexer nele às cegas arrisca quebrar a criação. Entregue como blueprints prontos em `docs/TEMPLATES.md`; integrar no modal exige verificação no navegador.
+- **Paralelismo real na UI** (disparar várias features em worktrees ao mesmo tempo): o isolamento por worktree já existe; falta reescrever a orquestração do sprint (hoje sequencial) para um pool concorrente com N streams. É mudança estrutural na orquestração densa da UI (`app.js`); em andamento com validação headless (Playwright).
+- **Templates de operação — IMPLEMENTADO:** seletor no passo 1 da "Nova operação" (Sistema/SaaS/Lab/Pentest) pré-preenche briefing/visão/escopo; detalhes em `docs/TEMPLATES.md`. Validado no navegador (`npm run test:ui`).
 - **PR automático no GitHub:** exige que a pasta da operação seja um repo com remote no GitHub (hoje os repos de projeto são locais) + `GITHUB_TOKEN` no bridge. O "PR local" (painel de branches: diff/merge) já cobre o caso local.
 - **RAG vetorial (busca semântica):** precisa de `sqlite-vec` + um provedor de embeddings (dep pesada ou chave). A memória léxica FTS5 já cobre a busca no histórico.
 - **Motor persistente (`kiro-cli serve`):** trocar o spawn-por-etapa por uma conexão WebSocket persistente (v3) — otimização estrutural opcional.

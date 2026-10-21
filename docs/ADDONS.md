@@ -36,8 +36,8 @@ Guia do que foi adicionado ao orquestrador (sobre o kiro-cli headless) e como us
 
 ## Próximos passos (prontos para implementar; dependem de pré-requisito)
 
-### Resume de sessão — NÃO funciona em one-shot headless (testado)
-O engine e o bridge aceitam `resumeId` (vira `--resume-id`), mas um **teste real** mostrou que retomar o `sessionId` de um run headless `stream-json` **falha**: o segundo run com `--resume-id <sessionId do run anterior>` não continua a conversa (o processo falha). Ou seja, o `sessionId` de runs one-shot não é resumível assim. Conclusão: **não** ligar `resumeId` no fluxo de etapas/chat — quebraria as mensagens seguintes. Para iteração contínua de verdade, o caminho é migrar o chat para o modo **ACP multi-turn** (`kiro-cli acp`), que é uma evolução estrutural do bridge. A flag `--resume-id` fica plumbada (e coberta por teste no nível de montagem do comando) para quando/se o modo ACP for adotado.
+### Resume de sessão — IMPLEMENTADO (chat contínuo)
+O `--resume-id` **retoma** sessões one-shot headless: o `sessionId` do stream é o id resumível (confirmado por `kiro-cli chat --list-sessions`). O chat 1:1 com o agente agora **continua a mesma sessão Kiro** nos turnos seguintes — passa `resumeId` e, ao retomar, não reenvia o histórico (a sessão já o mantém), economizando contexto. Qualquer run aceita `options.resumeId`. Verificado por **`npm run test:resume`** (run 1 fixa um número, run 2 retoma e o recorda). *(Correção: uma versão anterior deste doc dizia que não funcionava — era um defeito do teste antigo.)*
 
 ### Memória / RAG vetorial (upgrade opcional)
 A **memória léxica (FTS5)** já está implementada (veja acima) — sem dependência nova. O upgrade para **RAG vetorial** (busca semântica) é opcional e precisa de: `npm i sqlite-vec` (binários prontos, carregado no `better-sqlite3`) **mais um provedor de embeddings** (um modelo local pesado, ex.: `@xenova/transformers`, ou uma API de embeddings com chave) para gerar os vetores — o kiro-cli não expõe embeddings. Enquanto não houver provedor de embeddings, o FTS5 cobre o caso de busca no histórico.
@@ -66,5 +66,4 @@ Itens de alto valor ainda não implementados, com o motivo (para continuar com s
 - **Templates de operação no fluxo de criação** (pré-preencher briefing/features ao criar): o fluxo "Nova operação" é um modal multi-etapa + mapa 3D; mexer nele às cegas arrisca quebrar a criação. Entregue como blueprints prontos em `docs/TEMPLATES.md`; integrar no modal exige verificação no navegador.
 - **PR automático no GitHub:** exige que a pasta da operação seja um repo com remote no GitHub (hoje os repos de projeto são locais) + `GITHUB_TOKEN` no bridge. O "PR local" (painel de branches: diff/merge) já cobre o caso local.
 - **RAG vetorial (busca semântica):** precisa de `sqlite-vec` + um provedor de embeddings (dep pesada ou chave). A memória léxica FTS5 já cobre a busca no histórico.
-- **Resume contínuo de sessão:** o `--resume-id` não retoma runs one-shot headless (testado); exige migrar o chat para o modo ACP multi-turn (`kiro-cli acp`) — evolução estrutural do bridge.
 - **Motor persistente (`kiro-cli serve`):** trocar o spawn-por-etapa por uma conexão WebSocket persistente (v3) — otimização estrutural opcional.

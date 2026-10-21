@@ -195,6 +195,35 @@ function removeWorktree(projectDir, dir) {
   return new Promise(resolve => execFile('git', ['worktree', 'remove', '--force', dir], { cwd: projectDir, windowsHide: true, timeout: 20000, env }, () => resolve()));
 }
 
+const SQUAD_BRANCH_RE = /^squad\/[A-Za-z0-9._-]{1,60}$/;
+/** List the squad/<id> branches of a project repo (the per-run worktree branches). */
+function listBranches(dir) {
+  if (gitMissing) return Promise.resolve([]);
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: gitCeiling() };
+  return new Promise(resolve => execFile('git', ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)%09%(contents:subject)%09%(committerdate:iso8601)', 'refs/heads/squad/'], { cwd: dir, windowsHide: true, timeout: 15000, env }, (err, out) => {
+    if (err) return resolve([]);
+    resolve(String(out || '').split(/\r?\n/).filter(Boolean).map(l => { const [branch, subject, date] = l.split('\t'); return { branch, subject: subject || '', date: date || '' }; }));
+  }));
+}
+/** Merge a squad/<id> branch into the project's current branch; aborts cleanly on conflict. */
+function mergeBranch(dir, branch) {
+  if (gitMissing) return Promise.resolve({ ok: false, error: 'git indisponível' });
+  if (!SQUAD_BRANCH_RE.test(branch)) return Promise.resolve({ ok: false, error: 'branch inválido' });
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: gitCeiling() };
+  const g = args => new Promise(res => execFile('git', args, { cwd: dir, windowsHide: true, timeout: 20000, env }, (err, out, serr) => res({ err, out: String(out || '') + String(serr || '') })));
+  return g(['-c', 'user.name=squad-code-kiro', '-c', 'user.email=squad-code-kiro@local', 'merge', '--no-ff', '-m', `merge ${branch}`, branch]).then(m => {
+    if (!m.err) return { ok: true };
+    return g(['merge', '--abort']).then(() => ({ ok: false, conflict: /conflict|conflito/i.test(m.out), error: m.out.slice(-300) }));
+  });
+}
+/** Delete a squad/<id> branch (force). */
+function deleteBranch(dir, branch) {
+  if (gitMissing) return Promise.resolve({ ok: false, error: 'git indisponível' });
+  if (!SQUAD_BRANCH_RE.test(branch)) return Promise.resolve({ ok: false, error: 'branch inválido' });
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: gitCeiling() };
+  return new Promise(res => execFile('git', ['branch', '-D', branch], { cwd: dir, windowsHide: true, timeout: 15000, env }, (err, out, serr) => res({ ok: !err, error: err ? (String(serr || '') + String(out || '')).slice(-300) : null })));
+}
+
 /** Folder of a project under PROJECTS_DIR; the name is a plain slug, so it cannot leave the root. */
 function projectDir(name) {
   const folder = String(name || '').trim();
@@ -706,6 +735,18 @@ async function handle(req, res) {
       const query = url.searchParams.get('q') || '';
       const limit = Number(url.searchParams.get('limit')) || 20;
       return json(res, 200, { ok: true, results: store ? store.searchRuns(query, limit) : [] });
+    }
+    // Worktree branches (squad/<id>) of a project repo: list, merge into the main tree, or delete.
+    if (req.method === 'GET' && url.pathname === '/api/branches') {
+      let dir; try { dir = projectDir(url.searchParams.get('project') || ''); } catch (e) { return fail(res, 400, e.message); }
+      if (!fs.existsSync(path.join(dir, '.git'))) return json(res, 200, { ok: true, branches: [] });
+      return json(res, 200, { ok: true, branches: await listBranches(dir) });
+    }
+    if (req.method === 'POST' && (url.pathname === '/api/branches/merge' || url.pathname === '/api/branches/delete')) {
+      const body = await readBody(req);
+      let dir; try { dir = projectDir(body.project); } catch (e) { return fail(res, 400, e.message); }
+      const r = url.pathname.endsWith('/merge') ? await mergeBranch(dir, String(body.branch || '')) : await deleteBranch(dir, String(body.branch || ''));
+      return json(res, r.ok ? 200 : 409, { ok: !!r.ok, ...r });
     }
     // First start: the page creates the database with the workspace the person chose (from scratch, the example, a backup or the
     // browser's copy). Validated before anything is written; refused once a workspace exists.

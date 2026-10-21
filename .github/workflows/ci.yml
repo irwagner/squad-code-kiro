@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install deps
+        run: npm ci
+      - name: Syntax check
+        run: |
+          node --check server.js
+          node --check db.js
+          node --check kiro-engine.js
+          node --check src/app.js
+          node --check scripts/build.mjs
+          node --check scripts/validate-agents.mjs
+      - name: Tests (ACP converter + key pool + FTS5 memory)
+        run: npm test
+      - name: Build index.html
+        run: node scripts/build.mjs
+      - name: Validate agent presets are well-formed JSON
+        run: node -e "const fs=require('fs');for(const f of fs.readdirSync('.kiro/agents').filter(x=>x.endsWith('.json'))){JSON.parse(fs.readFileSync('.kiro/agents/'+f));console.log('ok '+f)}"

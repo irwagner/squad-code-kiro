@@ -329,8 +329,23 @@ function describeExit(code) {
   return `kiro-cli saiu com código ${code}.`;
 }
 
+/**
+ * Resolve a requested model id against the kiro-cli catalog. kiro-cli exits 1 on an unknown --model, and legacy/migrated
+ * workspaces may carry Claude-era aliases ('sonnet', 'opus'). Returns the requested id if valid (or if the catalog is unknown),
+ * otherwise maps an alias to the newest catalog id that mentions it, or '' to fall back to the kiro default ('auto').
+ */
+function pickModel(requested, ids) {
+  if (!requested) return '';
+  const list = Array.isArray(ids) ? ids.filter(x => typeof x === 'string' && x) : [];
+  if (!list.length || list.includes(requested)) return requested;
+  const want = String(requested).toLowerCase();
+  const match = list.find(id => id.toLowerCase().includes(want)) || list.find(id => want.includes(id.toLowerCase()));
+  return match || '';
+}
+
 module.exports = {
   buildKiroArgs,
+  pickModel,
   validateKiroOptions,
   makeAcpConverter,
   classifyFailure,

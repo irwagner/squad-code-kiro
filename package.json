@@ -13,6 +13,7 @@
     "test:resume": "node tests/resume.manual.cjs",
     "test:ui": "python tests/ui-smoke.manual.py",
     "test:parallel": "python tests/parallel.manual.py",
+    "test:live": "node tests/live-concurrency.manual.cjs",
     "agents:validate": "node scripts/validate-agents.mjs"
   },
   "engines": {

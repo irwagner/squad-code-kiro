@@ -2,7 +2,7 @@
 // Quick sanity test for the ACP->Claude converter using the real events captured from kiro-cli.
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { makeAcpConverter, buildKiroArgs, validateKiroOptions } = require('../kiro-engine.js');
+const { makeAcpConverter, buildKiroArgs, validateKiroOptions, pickModel } = require('../kiro-engine.js');
 
 const events = [
   { type: 'runStarted', data: { payloadSchema: 'acp', acpProtocolVersion: 1, engine: 'v2' } },
@@ -76,5 +76,16 @@ assert(args4.some((a, i) => a === '--resume-id' && args4[i + 1] === 'SID-1'), 'r
 // --mode is dropped when the engine is not v3
 const args5 = buildKiroArgs(validateKiroOptions({ agentEngine: 'v2', mode: 'spec' }), 'p');
 assert(!args5.includes('--mode'), 'mode dropped when engine != v3');
+
+// model resolution against the kiro catalog (fixes exit-1 on Claude-era aliases like 'sonnet'/'opus')
+const CAT = ['auto', 'claude-opus-5.5', 'claude-sonnet-5.5', 'claude-opus-4.5', 'claude-sonnet-4.5', 'claude-haiku-4.5', 'gpt-5.6-terra'];
+assert(pickModel('sonnet', CAT) === 'claude-sonnet-5.5', "alias 'sonnet' -> newest sonnet, got " + pickModel('sonnet', CAT));
+assert(pickModel('opus', CAT) === 'claude-opus-5.5', "alias 'opus' -> newest opus, got " + pickModel('opus', CAT));
+assert(pickModel('haiku', CAT) === 'claude-haiku-4.5', "alias 'haiku' -> haiku");
+assert(pickModel('claude-sonnet-4.5', CAT) === 'claude-sonnet-4.5', 'valid id kept as-is');
+assert(pickModel('gpt', CAT) === 'gpt-5.6-terra', "alias 'gpt' -> gpt model");
+assert(pickModel('zzz-unknown', CAT) === '', 'unknown model -> empty (kiro default auto)');
+assert(pickModel('', CAT) === '', 'empty stays empty');
+assert(pickModel('sonnet', []) === 'sonnet', 'no catalog -> keep requested (cannot validate)');
 
 console.log(process.exitCode ? '\nSOME TESTS FAILED' : '\nALL CONVERTER TESTS PASSED');

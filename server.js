@@ -455,6 +455,19 @@ async function startRun(body) {
   if (creditBudget > 0 && sessionCredits >= creditBudget) throw Object.assign(new Error(`Orçamento de créditos da sessão atingido (${round4(sessionCredits)} de ${creditBudget}). Ajuste nas configurações ou reinicie o bridge.`), { status: 429 });
   const resolved = await resolveBin(opts.claudePath);
   if (!resolved) throw new Error(`Kiro CLI não encontrado ("${opts.claudePath}"). Ajuste o caminho nas configurações ou instale o kiro-cli.`);
+  // Guard against stale/invalid model ids (e.g. Claude-era 'sonnet'/'opus'): kiro-cli exits 1 on an unknown --model.
+  // Map an alias to the newest catalog id that mentions it; otherwise drop it so kiro uses its default ('auto').
+  if (opts.kiro && opts.kiro.model) {
+    try {
+      const mc = await kiroModels(resolved);
+      const ids = (mc.models || []).map(m => m.id);
+      const picked = kiroEngine.pickModel(opts.kiro.model, ids);
+      if (picked !== opts.kiro.model) {
+        console.warn(`Modelo "${opts.kiro.model}" não está no catálogo do kiro-cli; usando ${picked || 'o padrão (auto)'}.`);
+        opts.kiro.model = picked || undefined;
+      }
+    } catch { /* if the catalog can't be read, leave the model as-is */ }
+  }
   const id = crypto.randomUUID();
   let worktree = null;
   if (opts.projectRun) {

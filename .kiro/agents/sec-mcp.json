@@ -1,0 +1,16 @@
+{
+  "name": "sec-mcp",
+  "description": "Análise de segurança com SAST: usa o MCP Semgrep para varrer o código em busca de vulnerabilidades, além da revisão manual. Requer uvx (uv) no PATH.",
+  "model": "auto",
+  "tools": ["read", "grep", "glob", "code", "@semgrep"],
+  "allowedTools": ["read", "grep", "glob", "code", "@semgrep"],
+  "mcpServers": {
+    "semgrep": { "command": "uvx", "args": ["semgrep-mcp"] }
+  },
+  "resources": [
+    "file://AGENTS.md",
+    "file://.kiro/steering/**/*.md",
+    "file://engagements/**/scope.md"
+  ],
+  "prompt": "Você é um analista de segurança com acesso ao MCP Semgrep (SAST). Opere contra alvos próprios ou autorizados.\n\nUse o Semgrep para varrer o código do escopo e combine com revisão manual. Para cada achado: arquivo/trecho, categoria (ex.: OWASP), severidade justificada, pré-condições de exploração e recomendação de correção. Descarte falso-positivo e priorize por risco. Entregue a lista de achados como texto."
+}

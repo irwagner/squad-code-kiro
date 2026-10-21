@@ -1,7 +1,7 @@
 """Build the dependency-free, standalone SQUAD/CODE interface.
 
     python build.py          writes index.html
-    python build.py --copy   also writes ../squad-code-network.html (a copy next to the repo folder)
+    python build.py --copy   also writes ../squad-code-kiro.html (a copy next to the repo folder)
 """
 import sys
 from pathlib import Path
@@ -28,8 +28,8 @@ def build(copy: bool = False) -> None:
     html = html.replace('<!--SCRIPTS-->', '<script>\n' + scripts + '\n</script>')
     (ROOT / 'index.html').write_text(html, encoding='utf-8')
     if copy:
-        (ROOT.parent / 'squad-code-network.html').write_text(html, encoding='utf-8')
-        print(f'Copied to {ROOT.parent / "squad-code-network.html"}')
+        (ROOT.parent / 'squad-code-kiro.html').write_text(html, encoding='utf-8')
+        print(f'Copied to {ROOT.parent / "squad-code-kiro.html"}')
     print(f'Built {len(html.encode("utf-8")) // 1024} KB self-contained HTML')
 
 

@@ -20,6 +20,7 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn, execFile } = require('node:child_process');
+const kiroEngine = require('./kiro-engine.js');
 
 const ROOT = __dirname;
 const argPort = process.argv.indexOf('--port');
@@ -27,7 +28,7 @@ const PORT = Number(argPort > -1 ? process.argv[argPort + 1] : process.env.SQUAD
 const HOST = '127.0.0.1';
 const TOKEN = crypto.randomBytes(24).toString('hex');
 const HOME = process.env.SQUAD_HOME || os.homedir();
-const DEFAULT_BIN = process.env.SQUAD_CLAUDE_BIN || 'claude';
+const DEFAULT_BIN = process.env.SQUAD_KIRO_BIN || process.env.SQUAD_CLAUDE_BIN || 'kiro-cli';
 const IS_WIN = process.platform === 'win32';
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-code-'));
 // Every project runs in its own folder under PROJECTS_DIR (created on the first run).
@@ -70,6 +71,8 @@ const MAX_BODY = 2 * 1024 * 1024;
 
 const runs = new Map();
 let maxConcurrent = 2;
+let creditBudget = 0;      // 0 = sem limite. Teto de créditos da sessão, verificado antes de iniciar uma execução.
+let sessionCredits = 0;    // créditos gastos desde que o bridge subiu (soma das execuções concluídas).
 const versionCache = new Map();
 
 /* ---------- helpers ---------- */
@@ -191,6 +194,55 @@ async function claudeVersion(bin) {
   return info;
 }
 
+// List the models the installed Kiro CLI reports (`kiro-cli chat --list-models --format json`). Cached for 5 min. Used by GET
+// /api/models so the UI model picker reflects exactly what this CLI offers (names, credit multipliers, default).
+let modelsCache = { at: 0, bin: null, data: null };
+async function kiroModels(bin) {
+  const resolved = await resolveBin(bin);
+  if (!resolved) return { models: [], default: null, error: `Executável "${bin}" não encontrado no PATH.` };
+  if (modelsCache.data && modelsCache.bin === resolved && Date.now() - modelsCache.at < 300000) return modelsCache.data;
+  const data = await new Promise(resolve => {
+    const child = spawnBin(resolved, ['chat', '--list-models', '--format', 'json'], { windowsHide: true });
+    let out = ''; let err = '';
+    const timer = setTimeout(() => child.kill(), 15000);
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { err += d; });
+    child.on('error', e => { clearTimeout(timer); resolve({ models: [], default: null, error: e.message }); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (code !== 0) return resolve({ models: [], default: null, error: (err || out).trim().slice(0, 500) || `exit ${code}` });
+      try {
+        const parsed = JSON.parse(out);
+        const models = Array.isArray(parsed.models) ? parsed.models.map(m => ({
+          id: String(m.model_id || m.model_name || ''),
+          name: String(m.model_name || m.model_id || ''),
+          description: typeof m.description === 'string' ? m.description.slice(0, 300) : '',
+          rate: typeof m.rate_multiplier === 'number' ? m.rate_multiplier : null,
+          context: typeof m.context_window_tokens === 'number' ? m.context_window_tokens : null,
+        })).filter(m => m.id) : [];
+        resolve({ models, default: parsed.default_model || null, error: null });
+      } catch (e) { resolve({ models: [], default: null, error: 'Falha ao ler a lista de modelos: ' + e.message }); }
+    });
+  });
+  if (data.models.length) modelsCache = { at: Date.now(), bin: resolved, data };
+  return data;
+}
+
+// List MCP servers configured for the Kiro CLI (`kiro-cli mcp list`, text output). Used by GET /api/mcp for the settings panel.
+async function kiroMcpList(bin) {
+  const resolved = await resolveBin(bin);
+  if (!resolved) return { text: '', error: `Executável "${bin}" não encontrado no PATH.` };
+  return new Promise(resolve => {
+    const child = spawnBin(resolved, ['mcp', 'list'], { windowsHide: true });
+    let out = ''; let err = '';
+    const timer = setTimeout(() => child.kill(), 15000);
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { err += d; });
+    child.on('error', e => { clearTimeout(timer); resolve({ text: '', error: e.message }); });
+    child.on('close', code => { clearTimeout(timer); const text = String(out + err).slice(0, 20000); resolve({ text, error: code === 0 ? null : (String(err || '').trim().slice(0, 500) || `exit ${code}`) }); });
+  });
+}
+
 function killTree(child) {
   if (!child || child.exitCode !== null || child.killed) return;
   if (IS_WIN) execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {});
@@ -266,6 +318,22 @@ function validateRunOptions(o = {}) {
   out.agents = validateAgents(o.agents);
   out.forwardSubagents = o.forwardSubagents === true;
   const timeout = Number(o.timeoutSec); out.timeoutSec = Number.isFinite(timeout) && timeout >= 10 && timeout <= 7200 ? timeout : 900;
+
+  // Kiro engine options: map the UI's fields to the kiro-cli flags. `agent` selects a native Kiro agent (.kiro/agents/<name>).
+  // `trustTools` (optional array) restricts trust; omitted => trust-all (headless squad execution needs tools without prompts).
+  out.kiro = kiroEngine.validateKiroOptions({
+    agent: typeof o.agent === 'string' && o.agent.trim() ? o.agent.trim() : undefined,
+    model: o.model || undefined,
+    effort: o.effort || undefined,
+    agentEngine: o.agentEngine || undefined,
+    mode: o.mode || undefined,
+    cloud: o.cloud === true,
+    repo: o.repo || undefined,
+    requireMcpStartup: o.requireMcpStartup === true,
+    resumeId: o.resumeId || undefined,
+    trustTools: Array.isArray(o.trustTools) ? o.trustTools : undefined,
+    trustAll: o.trustAll,
+  });
   return out;
 }
 
@@ -301,109 +369,172 @@ async function startRun(body) {
   const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.slice(0, 100000) : '';
   const opts = validateRunOptions(body.options);
   if (activeCount() >= maxConcurrent) throw Object.assign(new Error(`Limite de ${maxConcurrent} execuções simultâneas atingido.`), { status: 429 });
+  if (creditBudget > 0 && sessionCredits >= creditBudget) throw Object.assign(new Error(`Orçamento de créditos da sessão atingido (${round4(sessionCredits)} de ${creditBudget}). Ajuste nas configurações ou reinicie o bridge.`), { status: 429 });
   const resolved = await resolveBin(opts.claudePath);
-  if (!resolved) throw new Error(`Claude Code não encontrado ("${opts.claudePath}"). Ajuste o caminho nas configurações.`);
+  if (!resolved) throw new Error(`Kiro CLI não encontrado ("${opts.claudePath}"). Ajuste o caminho nas configurações ou instale o kiro-cli.`);
   if (opts.projectRun) await ensureProjectRepo(opts.cwd);
 
   const id = crypto.randomUUID();
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompts', 'none'];
-  let sysFile = null, settingsFile = null, agentsFile = null;
-  // OS temp cleanup can remove the (usually empty) folder while the bridge keeps running.
-  if (systemPrompt.trim() || opts.projectRun || opts.agents) await fsp.mkdir(TMP_DIR, { recursive: true });
-  if (systemPrompt.trim()) {
-    sysFile = path.join(TMP_DIR, `${id}.system.md`);
-    await fsp.writeFile(sysFile, systemPrompt, 'utf8');
-    args.push('--append-system-prompt-file', sysFile);
-  }
-  if (opts.projectRun) {
-    settingsFile = path.join(TMP_DIR, `${id}.settings.json`);
-    // The file tools also refuse reads outside the project folder (and --add-dir), so agents never take this app or the
-    // person's other folders for the project.
-    await fsp.writeFile(settingsFile, JSON.stringify({ claudeMdExcludes: APP_MEMORY_EXCLUDES, permissions: { blockReadsOutsideWorkingDirectories: true } }), 'utf8');
-    args.push('--settings', settingsFile);
-  }
-  if (opts.agents) {
-    agentsFile = path.join(TMP_DIR, `${id}.agents.json`);
-    await fsp.writeFile(agentsFile, JSON.stringify(opts.agents), 'utf8');
-    args.push('--agents', agentsFile);
-  }
-  if (opts.forwardSubagents) args.push('--forward-subagent-text');
-  if (opts.model) args.push('--model', opts.model);
-  if (opts.permissionMode) args.push('--permission-mode', opts.permissionMode);
-  if (opts.effort) args.push('--effort', opts.effort);
-  if (opts.maxBudgetUsd) args.push('--max-budget-usd', opts.maxBudgetUsd);
-  if (opts.tools) args.push('--tools', opts.tools.length ? opts.tools.join(',') : '');
-  if (opts.allowedTools.length) args.push('--allowedTools', opts.allowedTools.join(','));
-  if (opts.disallowedTools.length) args.push('--disallowedTools', opts.disallowedTools.join(','));
-  for (const d of opts.addDirs) args.push('--add-dir', d);
-  if (opts.partial) args.push('--include-partial-messages');
+  // Kiro CLI takes the prompt as a positional argument. A system prompt (if any) is prepended to the prompt text, since Kiro has
+  // no --append-system-prompt-file. We keep it bounded.
+  const fullPrompt = systemPrompt.trim() ? `${systemPrompt.trim()}\n\n---\n\n${prompt}` : prompt;
+  const kiroArgs = kiroEngine.buildKiroArgs(opts.kiro, fullPrompt);
+  // Public arg view: hide the (possibly large) prompt so the console shows the command, not the whole text.
+  const publicArgs = kiroArgs.map((a, i) => i === kiroArgs.length - 1 ? '<prompt>' : a);
 
-  const child = spawnBin(resolved, args, {
-    cwd: opts.cwd, windowsHide: true, detached: !IS_WIN,
-    // With squad colleagues, calls run in the foreground: the Agent tool result is the colleague's answer, not a launch notice.
-    // Project runs: git stops at PROJECTS_DIR (see ensureProjectRepo), even when the folder's own .git is missing.
-    env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT || 'squad-code-bridge', ...(opts.agents ? { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' } : {}), ...(opts.projectRun ? { GIT_CEILING_DIRECTORIES: gitCeiling() } : {}) },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
   const run = {
     id, status: 'running', startedAt: new Date().toISOString(), endedAt: null, label: String(body.label || '').slice(0, 200),
-    cwd: opts.cwd, args: args.map(a => a === sysFile ? '<system-prompt-file>' : a === settingsFile ? '<settings-file>' : a === agentsFile ? '<agents-file>' : a), child, events: [], clients: new Set(),
-    result: null, sysFile, settingsFile, agentsFile, timer: null, cancelled: false,
-    // History: who ran it and where (body.meta, whitelisted in db.js), saved events count and the batch waiting to be written.
-    // Without a database yet (direct API use before the setup), the run still works but stays out of the history.
-    meta: dbModule.runMeta(body.meta), project: typeof body.options?.project === 'string' ? body.options.project.slice(0, 80) : '', persist: !!store, saved: 0, pending: [], flushTimer: null,
+    cwd: opts.cwd, args: publicArgs, child: null, events: [], clients: new Set(),
+    result: null, timer: null, cancelled: false, timedOut: false,
+    meta: dbModule.runMeta(body.meta), project: typeof body.options?.project === 'string' ? body.options.project.slice(0, 80) : '',
+    persist: !!store, saved: 0, pending: [], flushTimer: null,
+    // Rotation bookkeeping.
+    keyAttempts: [], credits: 0,
   };
   runs.set(id, run);
   if (run.persist) try { store.insertRun(run); } catch (e) { run.persist = false; console.warn(`Histórico da execução ${id} não gravado: ${e.message}`); }
-  pushEvent(run, { type: 'bridge', subtype: 'spawned', pid: child.pid, cwd: opts.cwd, args: run.args, at: run.startedAt });
+  pushEvent(run, { type: 'bridge', subtype: 'spawned', pid: null, cwd: opts.cwd, args: run.args, at: run.startedAt });
 
-  run.timer = setTimeout(() => { run.timedOut = true; pushEvent(run, { type: 'bridge', subtype: 'timeout', timeoutSec: opts.timeoutSec }); killTree(child); }, opts.timeoutSec * 1000);
+  // Overall timeout spans all key-rotation attempts.
+  run.timer = setTimeout(() => { run.timedOut = true; pushEvent(run, { type: 'bridge', subtype: 'timeout', timeoutSec: opts.timeoutSec }); killTree(run.child); }, opts.timeoutSec * 1000);
 
-  let buffer = '';
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', chunk => {
-    buffer += chunk;
-    let nl;
-    while ((nl = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, nl).trim(); buffer = buffer.slice(nl + 1);
-      if (!line) continue;
-      let evt; try { evt = JSON.parse(line); } catch { evt = { type: 'raw', text: line.slice(0, 4000) }; }
-      if (evt.type === 'result') run.result = evt;
-      pushEvent(run, evt);
-    }
+  // Drive the rotation loop asynchronously; return the run immediately so the HTTP response (runId) goes out at once.
+  runWithRotation(run, resolved, kiroArgs, opts).catch(err => {
+    // Defensive: a bug in the loop should still close the run.
+    finalizeRun(run, { code: null, stderrTail: err.message || 'erro interno no bridge', converter: null });
   });
-  let stderrTail = '';
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-4000); pushEvent(run, { type: 'stderr', text: chunk.slice(0, 4000) }); });
-  child.on('error', err => { stderrTail += err.message; });
-  child.on('close', code => {
-    clearTimeout(run.timer);
-    if (buffer.trim()) { try { const evt = JSON.parse(buffer); if (evt.type === 'result') run.result = evt; pushEvent(run, evt); } catch { pushEvent(run, { type: 'raw', text: buffer.slice(0, 4000) }); } }
-    const r = run.result || {};
-    const isError = run.cancelled || run.timedOut || code !== 0 || !!r.is_error;
-    run.status = run.cancelled ? 'cancelled' : run.timedOut ? 'timeout' : isError ? 'error' : 'done';
-    run.endedAt = new Date().toISOString();
-    const exit = {
-      type: 'exit', status: run.status, code, isError,
-      result: typeof r.result === 'string' ? r.result : '',
-      costUsd: r.total_cost_usd ?? r.cost_usd ?? null, durationMs: r.duration_ms ?? null,
-      numTurns: r.num_turns ?? null, sessionId: r.session_id ?? null,
-      error: isError ? (run.cancelled ? 'Execução cancelada pelo operador.' : run.timedOut ? 'Tempo limite excedido.' : (r.is_error && r.result) || stderrTail.trim().slice(-1500) || `claude saiu com código ${code}`) : null,
-    };
-    pushEvent(run, exit);
-    if (run.persist) try { store.finishRun(run, exit); } catch (e) { console.warn(`Histórico da execução ${id} não finalizado: ${e.message}`); }
-    for (const res of run.clients) res.end();
-    run.clients.clear();
-    for (const file of [run.sysFile, run.settingsFile, run.agentsFile]) if (file) fsp.rm(file, { force: true }).catch(() => {});
-    run.child = null;
-    // Keep finished runs for 30 minutes so late subscribers can replay.
-    setTimeout(() => runs.delete(id), 30 * 60 * 1000).unref();
-  });
-
-  child.stdin.on('error', () => {});
-  child.stdin.end(prompt, 'utf8');
   return run;
 }
+
+/* Count of keys in the pool (0 when no store yet). With no keys, we run once relying on the CLI's own auth (saved login). */
+function poolSize() { try { return store ? store.apiKeyCount() : 0; } catch { return 0; } }
+
+/**
+ * Run one step, rotating KIRO_API_KEY across the pool when a run fails from quota/auth. Each attempt is a fresh kiro-cli process.
+ * The ACP converter is re-created per attempt, but credits and events accumulate on the run.
+ */
+async function runWithRotation(run, resolved, kiroArgs, opts) {
+  const maxAttempts = Math.max(1, poolSize()); // at least one attempt (CLI's own auth when the pool is empty)
+  let lastStderr = '', lastCode = null, lastConverter = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (run.cancelled || run.timedOut) break;
+    // Pick a key from the pool (null => rely on the CLI's saved auth).
+    const picked = store ? store.nextApiKey() : null;
+    if (store && poolSize() > 0 && !picked) {
+      // Pool exists but every key is exhausted / cooling down.
+      lastStderr = 'Todas as chaves de API do pool estão esgotadas ou em espera. Adicione outra chave ou reative uma em Configurações.';
+      pushEvent(run, { type: 'bridge', subtype: 'keys-exhausted', message: lastStderr });
+      break;
+    }
+    if (picked) pushEvent(run, { type: 'bridge', subtype: 'key', keyId: picked.id, label: picked.label || '', attempt: attempt + 1 });
+
+    const attemptResult = await spawnKiroAttempt(run, resolved, kiroArgs, opts, picked);
+    lastStderr = attemptResult.stderrTail; lastCode = attemptResult.code; lastConverter = attemptResult.converter;
+    const summary = attemptResult.converter ? attemptResult.converter.summary() : null;
+    const credits = summary ? summary.credits || 0 : 0;
+
+    if (attemptResult.ok) {
+      if (picked) { try { store.markApiKeyOk(picked.id, credits); } catch {} }
+      run.credits += credits;
+      return finalizeRun(run, attemptResult);
+    }
+
+    // Failed attempt. Decide whether to rotate.
+    const kind = run.cancelled || run.timedOut ? 'other' : kiroEngine.classifyFailure(attemptResult.stderrTail, attemptResult.code);
+    if (picked) {
+      try {
+        if (kind === 'exhausted') store.setApiKeyStatus(picked.id, 'exhausted', attemptResult.stderrTail.slice(-300));
+        else if (kind === 'auth') store.setApiKeyStatus(picked.id, 'invalid', attemptResult.stderrTail.slice(-300));
+        store.markApiKeyFail(picked.id, attemptResult.stderrTail.slice(-300));
+      } catch {}
+    }
+    run.credits += credits;
+
+    const canRotate = picked && kiroEngine.shouldRotate(kind) && !run.cancelled && !run.timedOut && attempt + 1 < maxAttempts;
+    if (canRotate) {
+      pushEvent(run, { type: 'bridge', subtype: 'rotate', from: picked.id, reason: kind });
+      continue; // try next key
+    }
+    break; // not key-related, or no more keys
+  }
+
+  return finalizeRun(run, { code: lastCode, stderrTail: lastStderr, converter: lastConverter });
+}
+
+/**
+ * Spawn a single kiro-cli attempt. Resolves with { ok, code, stderrTail, converter } once the child closes.
+ * Streams ACP events through the converter into the run's event stream (adapting them to the Claude-style contract the UI reads).
+ */
+function spawnKiroAttempt(run, resolved, kiroArgs, opts, picked) {
+  return new Promise(resolveAttempt => {
+    const converter = kiroEngine.makeAcpConverter();
+    // Env for the attempt. When a key is picked, set KIRO_API_KEY for this child only. The CLI uses the API key only when no saved
+    // login exists; the operator should `kiro-cli logout` first for the pool to take effect (documented in the UI/README).
+    const env = { ...process.env, SQUAD_CODE_ENTRYPOINT: 'squad-code-bridge' };
+    if (picked) env.KIRO_API_KEY = picked.key;
+    if (opts.projectRun) env.GIT_CEILING_DIRECTORIES = gitCeiling();
+
+    const child = spawnBin(resolved, kiroArgs, {
+      cwd: opts.cwd, windowsHide: true, detached: !IS_WIN, env,
+      stdio: ['ignore', 'pipe', 'pipe'], // prompt is a CLI arg, so stdin is unused
+    });
+    run.child = child;
+    // Update the spawned pid now that we have it.
+    pushEvent(run, { type: 'bridge', subtype: 'pid', pid: child.pid });
+
+    let buffer = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => {
+      buffer += chunk;
+      let nl;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl).trim(); buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        let acp; try { acp = JSON.parse(line); } catch { pushEvent(run, { type: 'raw', text: line.slice(0, 4000) }); continue; }
+        for (const evt of converter(acp)) { if (evt.type === 'result') run.result = evt; pushEvent(run, evt); }
+      }
+    });
+    let stderrTail = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-4000); pushEvent(run, { type: 'stderr', text: chunk.slice(0, 4000) }); });
+    child.on('error', err => { stderrTail += err.message; });
+    child.on('close', code => {
+      if (buffer.trim()) { try { for (const evt of converter(JSON.parse(buffer))) { if (evt.type === 'result') run.result = evt; pushEvent(run, evt); } } catch { pushEvent(run, { type: 'raw', text: buffer.slice(0, 4000) }); } }
+      const summary = converter.summary();
+      const ok = !run.cancelled && !run.timedOut && code === 0 && !summary.isError;
+      resolveAttempt({ ok, code, stderrTail, converter });
+    });
+  });
+}
+
+/** Build and push the final `exit` event and close the run. Mirrors the original bridge's exit contract (plus credits). */
+function finalizeRun(run, { code, stderrTail, converter }) {
+  if (run.endedAt) return run; // already finalized
+  clearTimeout(run.timer);
+  const summary = converter ? converter.summary() : {};
+  sessionCredits = round4(sessionCredits + (run.credits || summary.credits || 0));
+  const isError = run.cancelled || run.timedOut || code !== 0 || !!summary.isError;
+  run.status = run.cancelled ? 'cancelled' : run.timedOut ? 'timeout' : isError ? 'error' : 'done';
+  run.endedAt = new Date().toISOString();
+  const exit = {
+    type: 'exit', status: run.status, code, isError,
+    result: typeof summary.finalText === 'string' ? summary.finalText : '',
+    // Kiro bills in credits. costUsd stays null (the UI tolerates it); credits carries the real cost.
+    costUsd: null, credits: round4(run.credits || summary.credits || 0),
+    durationMs: summary.durationMs ?? null, numTurns: summary.numTurns ?? null, sessionId: summary.sessionId ?? null,
+    error: isError ? (run.cancelled ? 'Execução cancelada pelo operador.' : run.timedOut ? 'Tempo limite excedido.' : (summary.errorText || String(stderrTail || '').trim().slice(-1500) || kiroEngine.describeExit(code))) : null,
+  };
+  pushEvent(run, exit);
+  if (run.persist) try { store.finishRun(run, exit); } catch (e) { console.warn(`Histórico da execução ${run.id} não finalizado: ${e.message}`); }
+  for (const res of run.clients) res.end();
+  run.clients.clear();
+  run.child = null;
+  setTimeout(() => runs.delete(run.id), 30 * 60 * 1000).unref();
+  return run;
+}
+
+function round4(n) { return typeof n === 'number' && isFinite(n) ? Math.round(n * 10000) / 10000 : (Number(n) || 0); }
 
 function runSummary(r) {
   return { id: r.id, status: r.status, label: r.label, ...r.meta, project: r.project, startedAt: r.startedAt, endedAt: r.endedAt, cwd: r.cwd, events: r.events.length };
@@ -491,9 +622,40 @@ async function handle(req, res) {
   const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
   try {
     if (req.method === 'GET' && url.pathname === '/api/health') {
-      const bin = url.searchParams.get('claudePath') || DEFAULT_BIN;
+      const bin = url.searchParams.get('claudePath') || url.searchParams.get('kiroPath') || DEFAULT_BIN;
       const info = await claudeVersion(bin);
-      return json(res, 200, { ok: true, bridge: 'squad-code', claudeVersion: info.version, claudePath: info.resolved, claudeError: info.error, defaultCwd: process.cwd(), projectsDir: longPath(PROJECTS_DIR), home: HOME, platform: process.platform, activeRuns: activeCount(), maxConcurrent, dbReady: !setupNeeded(), dbPath: store?.file || DB_FILE });
+      let keys = 0; try { keys = store ? store.apiKeyCount() : 0; } catch {}
+      // Legacy field names (claudeVersion/claudePath/claudeError) kept for UI compatibility; mirrored under kiro* names too.
+      return json(res, 200, {
+        ok: true, bridge: 'squad-code', engine: 'kiro-cli',
+        claudeVersion: info.version, claudePath: info.resolved, claudeError: info.error,
+        kiroVersion: info.version, kiroPath: info.resolved, kiroError: info.error,
+        apiKeys: keys,
+        defaultCwd: process.cwd(), projectsDir: longPath(PROJECTS_DIR), home: HOME, platform: process.platform,
+        activeRuns: activeCount(), maxConcurrent, sessionCredits: round4(sessionCredits), creditBudget, dbReady: !setupNeeded(), dbPath: store?.file || DB_FILE,
+      });
+    }
+    // Live model list from the installed Kiro CLI, so the UI model picker always matches what this CLI offers.
+    if (req.method === 'GET' && url.pathname === '/api/models') {
+      const bin = url.searchParams.get('kiroPath') || url.searchParams.get('claudePath') || DEFAULT_BIN;
+      const info = await kiroModels(bin);
+      return json(res, 200, { ok: !info.error, ...info });
+    }
+    // Configured MCP servers (kiro-cli mcp list) for the settings MCP panel.
+    if (req.method === 'GET' && url.pathname === '/api/mcp') {
+      const bin = url.searchParams.get('kiroPath') || url.searchParams.get('claudePath') || DEFAULT_BIN;
+      const info = await kiroMcpList(bin);
+      return json(res, 200, { ok: !info.error, ...info });
+    }
+    // Usage/cost scorecard aggregated from the persisted run history (credits).
+    if (req.method === 'GET' && url.pathname === '/api/stats') {
+      return json(res, 200, { ok: true, stats: store ? store.statsSummary() : null });
+    }
+    // Lexical search over the run history (FTS5 memory).
+    if (req.method === 'GET' && url.pathname === '/api/search') {
+      const query = url.searchParams.get('q') || '';
+      const limit = Number(url.searchParams.get('limit')) || 20;
+      return json(res, 200, { ok: true, results: store ? store.searchRuns(query, limit) : [] });
     }
     // First start: the page creates the database with the workspace the person chose (from scratch, the example, a backup or the
     // browser's copy). Validated before anything is written; refused once a workspace exists.
@@ -510,7 +672,34 @@ async function handle(req, res) {
       const body = await readBody(req);
       const n = Number(body.concurrency);
       if (Number.isInteger(n) && n >= 1 && n <= 8) maxConcurrent = n;
-      return json(res, 200, { ok: true, maxConcurrent });
+      const cb = Number(body.creditBudget);
+      if (Number.isFinite(cb) && cb >= 0 && cb <= 1000000) creditBudget = cb;
+      return json(res, 200, { ok: true, maxConcurrent, creditBudget });
+    }
+    /* ---------- API key pool (KIRO_API_KEY rotation) ---------- */
+    if (url.pathname === '/api/keys') {
+      if (req.method === 'GET') return json(res, 200, { ok: true, keys: store ? store.listApiKeys() : [], count: store ? store.apiKeyCount() : 0 });
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const added = needStore().addApiKey(body.key, body.label || '');
+        return json(res, 201, { ok: true, key: added });
+      }
+    }
+    if (parts[1] === 'keys' && parts[2] && !parts[3]) {
+      const id = Number(parts[2]);
+      if (!Number.isInteger(id)) return fail(res, 400, 'Id de chave inválido.');
+      if (req.method === 'DELETE') return json(res, 200, needStore().removeApiKey(id));
+      if (req.method === 'PATCH' || req.method === 'PUT') {
+        const body = await readBody(req);
+        let view;
+        if (typeof body.label === 'string') view = needStore().setApiKeyLabel(id, body.label);
+        if (typeof body.status === 'string') view = needStore().setApiKeyStatus(id, body.status, body.error || null, body.cooldownUntil || null);
+        return json(res, 200, { ok: true, key: view || needStore().listApiKeys().find(k => k.id === id) || null });
+      }
+    }
+    if (url.pathname === '/api/keys/reorder' && req.method === 'POST') {
+      const body = await readBody(req);
+      return json(res, 200, { ok: true, keys: needStore().reorderApiKeys(Array.isArray(body.ids) ? body.ids : []) });
     }
     if (url.pathname === '/api/runs' && req.method === 'GET') {
       // The history comes from the database; runs still in memory report their current status.
@@ -626,10 +815,11 @@ server.listen(PORT, HOST, () => {
   if (store) console.log(`Banco de dados: ${store.file}`);
   else console.log(`Banco de dados: nenhum em ${DATA_DIR}. Abra ${url} para criar um.`);
   if (store?.interrupted) console.log(`${store.interrupted} execução(ões) interrompida(s) na última sessão marcada(s) no histórico.`);
+  if (store) { try { const n = store.apiKeyCount(); if (n) console.log(`Pool de API keys: ${n} chave(s) carregada(s).`); } catch {} }
   if (process.env.SQUAD_PRINT_TOKEN) console.log(`TOKEN=${TOKEN}`);
   claudeVersion(DEFAULT_BIN).then(info => {
-    if (info.version) console.log(`Claude Code ${info.version} (${info.resolved})`);
-    else console.warn(`Claude Code não encontrado (${DEFAULT_BIN}): ${info.error}\n  Instale o Claude Code, rode "claude" uma vez para fazer login e reinicie, ou aponte SQUAD_CLAUDE_BIN para o executável.\n  Sem ele o app abre, mas as execuções ficam só na simulação.`);
+    if (info.version) console.log(`Kiro CLI ${info.version} (${info.resolved})`);
+    else console.warn(`Kiro CLI não encontrado (${DEFAULT_BIN}): ${info.error}\n  Instale o kiro-cli, faça login (ou use o pool de API keys) e reinicie, ou aponte SQUAD_KIRO_BIN para o executável.\n  Sem ele o app abre, mas as execuções ficam só na simulação.`);
   }, () => {});
 });
 

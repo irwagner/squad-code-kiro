@@ -1,0 +1,20 @@
+{
+  "name": "dev-mcp",
+  "description": "Dev com documentação ao vivo: além das ferramentas nativas, usa o MCP Context7 para consultar a doc atualizada das bibliotecas (reduz alucinação de API). Requer CONTEXT7_API_KEY e npx no PATH.",
+  "model": "auto",
+  "tools": ["read", "write", "shell", "grep", "glob", "code", "@context7"],
+  "allowedTools": ["read", "write", "shell", "grep", "glob", "code", "@context7"],
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"],
+      "env": { "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}" }
+    }
+  },
+  "resources": [
+    "file://AGENTS.md",
+    "file://docs/**/*.md",
+    "file://.kiro/steering/**/*.md"
+  ],
+  "prompt": "Você é um operador de desenvolvimento com acesso ao MCP Context7 (documentação ao vivo das bibliotecas).\n\nAntes de usar uma API/biblioteca que você não tem certeza, consulte o Context7 para a versão correta em vez de adivinhar. Implemente a feature dentro da pasta do projeto, seguindo as convenções do repositório, com validação de entrada e tratamento de erros. Rode build e testes antes de concluir e entregue um resumo (o que mudou, arquivos, como testou)."
+}

@@ -26,3 +26,12 @@ Thumbs.db
 
 # Workspace salvo pelo bridge (data/workspace.json, backups)
 data/
+
+# Engajamentos de pentest: escopo, autorização e relatórios são sensíveis — versione só o template e o README
+engagements/*
+!engagements/_template/
+!engagements/README.md
+
+# Config local do Kiro (os presets .kiro/agents/*.json e .kiro/steering/*.md SÃO versionados)
+KIRO.local.md
+.kiro/**/*.local.json

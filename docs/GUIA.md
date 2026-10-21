@@ -308,7 +308,7 @@ Use **Exportar workspace** nas configurações para guardar um backup JSON e **I
 ## 🛠️ Código-fonte
 
 ```text
-squad-code-network/
+squad-code-kiro/
   index.html                 # Interface completa, pronta para abrir
   server.js                  # Bridge local: serve o HTML e executa claude -p
   db.js                      # Banco SQLite (better-sqlite3): workspace, versões, sala, conversas e execuções
@@ -339,7 +339,7 @@ Após editar os arquivos em `src`, execute no diretório do pacote:
 python build.py
 ```
 
-O script gera `index.html`; com `python build.py --copy` também grava uma cópia `squad-code-network.html` no diretório acima da pasta do projeto. Python é necessário apenas para recompilar, não para usar o HTML já entregue. Para alterar retratos padrão no código-fonte, atualize `src/portraits.js`; trocar somente os JPEGs em `assets/` não altera o HTML. Já os avatares da galeria vêm de `assets/*.png`: basta adicionar ou trocar PNGs ali e rodar `python build.py` (requer Pillow), que reduz cada imagem para 320px e regenera `src/avatars.js`. O rótulo vem do nome do arquivo (`mother-protocol.png` → MOTHER PROTOCOL).
+O script gera `index.html`; com `python build.py --copy` também grava uma cópia `squad-code-kiro.html` no diretório acima da pasta do projeto. Python é necessário apenas para recompilar, não para usar o HTML já entregue. Para alterar retratos padrão no código-fonte, atualize `src/portraits.js`; trocar somente os JPEGs em `assets/` não altera o HTML. Já os avatares da galeria vêm de `assets/*.png`: basta adicionar ou trocar PNGs ali e rodar `python build.py` (requer Pillow), que reduz cada imagem para 320px e regenera `src/avatars.js`. O rótulo vem do nome do arquivo (`mother-protocol.png` → MOTHER PROTOCOL).
 
 A cidade é uma cena Three.js (WebGL), e os marcadores/menus são elementos HTML interativos projetados sobre ela. Não é uma captura do jogo aplicada como fundo. Os retratos reutilizam recortes da imagem conceitual fornecida nesta conversa.
 

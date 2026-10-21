@@ -57,6 +57,7 @@ const hash = text => crypto.createHash('sha1').update(text).digest('hex').slice(
 const nowISO = () => new Date().toISOString();
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 const clip = (v, n) => typeof v === 'string' && v.length > n ? v.slice(0, n) + '…' : v;
+const round4 = n => typeof n === 'number' && isFinite(n) ? Math.round(n * 10000) / 10000 : (Number(n) || 0);
 const getPath = (o, p) => p.split('.').reduce((v, k) => isObj(v) ? v[k] : undefined, o);
 function setPath(o, p, value) { const ks = p.split('.'); let v = o; for (const k of ks.slice(0, -1)) { if (!isObj(v[k])) return; v = v[k]; } v[ks.at(-1)] = value; }
 
@@ -151,6 +152,35 @@ function openStore(dataDir) {
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   if (db.pragma('user_version', { simple: true }) < 1) db.transaction(() => { db.exec(schema()); db.pragma('user_version = 1'); })();
+  // Migration v2: API key pool for Kiro CLI (KIRO_API_KEY rotation). Additive; safe on existing databases.
+  if (db.pragma('user_version', { simple: true }) < 2) db.transaction(() => {
+    db.exec(`CREATE TABLE IF NOT EXISTS api_keys (
+      id INTEGER PRIMARY KEY,
+      label TEXT NOT NULL DEFAULT '',
+      api_key TEXT NOT NULL,
+      pos INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'active',   -- active | exhausted | disabled | invalid
+      credits_used REAL NOT NULL DEFAULT 0,
+      runs_ok INTEGER NOT NULL DEFAULT 0,
+      runs_failed INTEGER NOT NULL DEFAULT 0,
+      last_used_at TEXT,
+      last_error TEXT,
+      cooldown_until TEXT,
+      created_at TEXT NOT NULL
+    );`);
+    db.pragma('user_version = 2');
+  })();
+
+  // FTS5 search index over run results (searchable run memory). Guarded: if FTS5 is unavailable in this build, the database still
+  // opens and search just returns empty. Backfills existing finished runs once (when the index is empty).
+  let ftsReady = false;
+  try {
+    db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(run_id UNINDEXED, body)');
+    ftsReady = true;
+    if (!db.prepare('SELECT count(*) FROM runs_fts').pluck().get()) {
+      db.exec("INSERT INTO runs_fts(run_id, body) SELECT id, coalesce(label,'')||char(10)||coalesce(json_extract(result,'$.result'),'') FROM runs WHERE status != 'running' AND result IS NOT NULL");
+    }
+  } catch { ftsReady = false; }
 
   const q = {
     metaGet: db.prepare('SELECT value FROM meta WHERE key = ?').pluck(),
@@ -179,7 +209,23 @@ function openStore(dataDir) {
     runEvents: db.prepare('SELECT data FROM run_events WHERE run_id = ? ORDER BY seq').pluck(),
     runLastSeq: db.prepare('SELECT coalesce(max(seq), 0) FROM run_events WHERE run_id = ?').pluck(),
     runPrune: db.prepare(`DELETE FROM runs WHERE status != 'running' AND id NOT IN (SELECT id FROM runs ORDER BY started_at DESC LIMIT ${KEEP_RUNS})`),
+    keyList: db.prepare('SELECT id, label, api_key, pos, status, credits_used AS creditsUsed, runs_ok AS runsOk, runs_failed AS runsFailed, last_used_at AS lastUsedAt, last_error AS lastError, cooldown_until AS cooldownUntil, created_at AS createdAt FROM api_keys ORDER BY pos, id'),
+    keyGet: db.prepare('SELECT id, label, api_key, pos, status, credits_used AS creditsUsed, runs_ok AS runsOk, runs_failed AS runsFailed, last_used_at AS lastUsedAt, last_error AS lastError, cooldown_until AS cooldownUntil, created_at AS createdAt FROM api_keys WHERE id = ?'),
+    keyInsert: db.prepare('INSERT INTO api_keys (label, api_key, pos, status, created_at) VALUES (?, ?, ?, ?, ?)'),
+    keyMaxPos: db.prepare('SELECT coalesce(max(pos), -1) FROM api_keys').pluck(),
+    keyDelete: db.prepare('DELETE FROM api_keys WHERE id = ?'),
+    keySetStatus: db.prepare('UPDATE api_keys SET status = ?, last_error = ?, cooldown_until = ? WHERE id = ?'),
+    keySetLabel: db.prepare('UPDATE api_keys SET label = ? WHERE id = ?'),
+    keySetPos: db.prepare('UPDATE api_keys SET pos = ? WHERE id = ?'),
+    keyMarkOk: db.prepare("UPDATE api_keys SET runs_ok = runs_ok + 1, credits_used = credits_used + ?, last_used_at = ?, status = CASE WHEN status = 'exhausted' THEN status ELSE 'active' END WHERE id = ?"),
+    keyMarkFail: db.prepare('UPDATE api_keys SET runs_failed = runs_failed + 1, last_used_at = ?, last_error = ? WHERE id = ?'),
   };
+  // Prepared FTS statements only when the index exists (preparing against a missing table would throw).
+  const fts = ftsReady ? {
+    ins: db.prepare('INSERT INTO runs_fts (run_id, body) VALUES (?, ?)'),
+    del: db.prepare('DELETE FROM runs_fts WHERE run_id = ?'),
+    search: db.prepare("SELECT f.run_id AS id, snippet(runs_fts, 1, '«', '»', '…', 14) AS snippet FROM runs_fts f WHERE runs_fts MATCH ? ORDER BY rank LIMIT ?"),
+  } : null;
   const ent = {};
   for (const s of SPECS) ent[s.table] = {
     list: db.prepare(`SELECT rid, key, pos, h FROM ${s.table} WHERE parent_rid = ?`),
@@ -369,6 +415,7 @@ function openStore(dataDir) {
   const appendRunEvents = db.transaction((runId, events) => { for (const e of events) q.runEvent.run(runId, e.seq, e.type, e.data); if (events.length) q.runCount.run(events.at(-1).seq, runId); });
   function finishRun(r, exit) {
     q.runFinish.run({ id: r.id, status: r.status, endedAt: r.endedAt, result: JSON.stringify(exit).slice(0, 40000), costUsd: exit.costUsd ?? null, durationMs: exit.durationMs ?? null, sessionId: exit.sessionId ?? null });
+    if (fts) { try { fts.del.run(r.id); fts.ins.run(r.id, [r.label, exit.result].filter(Boolean).join('\n').slice(0, 20000)); } catch {} }
   }
   const summary = r => r && { id: r.id, status: r.status, label: r.label || '', kind: r.kind, project: r.project, projectId: r.project_id, agentId: r.agent_id, featureId: r.feature_id, cwd: r.cwd, startedAt: r.started_at, endedAt: r.ended_at, costUsd: r.cost_usd, durationMs: r.duration_ms, sessionId: r.session_id, events: r.events };
   function listRuns({ projectId = '', limit = 50 } = {}) {
@@ -396,11 +443,78 @@ function openStore(dataDir) {
   const migration = migrateLegacy();
   const interrupted = interruptRuns();
   sweep();
+
+  /* ---------- API key pool (Kiro CLI KIRO_API_KEY rotation) ---------- */
+  const KEY_RE = /^[\x20-\x7E]{8,400}$/; // printable ASCII, reasonable length
+  const KEY_STATUS = new Set(['active', 'exhausted', 'disabled', 'invalid']);
+  const maskKey = k => { const s = String(k || ''); return s.length <= 8 ? '****' : `${s.slice(0, 4)}…${s.slice(-4)}`; };
+  // Public view never exposes the raw key — only a masked preview.
+  const keyView = r => r && { id: r.id, label: r.label || '', preview: maskKey(r.api_key), pos: r.pos, status: r.status, creditsUsed: round4(r.creditsUsed), runsOk: r.runsOk, runsFailed: r.runsFailed, lastUsedAt: r.lastUsedAt, lastError: clip(r.lastError, 300), cooldownUntil: r.cooldownUntil, createdAt: r.createdAt };
+  function listApiKeys() { return q.keyList.all().map(keyView); }
+  function addApiKey(key, label = '') {
+    const raw = String(key || '').trim();
+    if (!KEY_RE.test(raw)) throw bad('Chave de API inválida (8 a 400 caracteres ASCII).');
+    const pos = q.keyMaxPos.get() + 1;
+    const id = Number(q.keyInsert.run(String(label || '').slice(0, 120), raw, pos, 'active', nowISO()).lastInsertRowid);
+    return keyView(q.keyGet.get(id));
+  }
+  function removeApiKey(id) { q.keyDelete.run(Number(id)); return { ok: true }; }
+  function setApiKeyStatus(id, status, error = null, cooldownUntil = null) {
+    if (!KEY_STATUS.has(status)) throw bad('Status de chave inválido.');
+    q.keySetStatus.run(status, error ? clip(String(error), 300) : null, cooldownUntil, Number(id));
+    return keyView(q.keyGet.get(Number(id)));
+  }
+  function setApiKeyLabel(id, label) { q.keySetLabel.run(String(label || '').slice(0, 120), Number(id)); return keyView(q.keyGet.get(Number(id))); }
+  function reorderApiKeys(ids) {
+    if (!Array.isArray(ids)) throw bad('Ordem inválida.');
+    db.transaction(() => { ids.forEach((id, i) => q.keySetPos.run(i, Number(id))); })();
+    return listApiKeys();
+  }
+  /** Next usable raw key for a run: lowest pos among active (not in cooldown). Returns {id, key} or null. Internal use only. */
+  function nextApiKey() {
+    const now = nowISO();
+    for (const r of q.keyList.all()) {
+      if (r.status !== 'active') continue;
+      if (r.cooldownUntil && r.cooldownUntil > now) continue;
+      return { id: r.id, key: r.api_key, label: r.label };
+    }
+    return null;
+  }
+  const markApiKeyOk = (id, credits = 0) => q.keyMarkOk.run(round4(credits) || 0, nowISO(), Number(id));
+  const markApiKeyFail = (id, error = '') => q.keyMarkFail.run(nowISO(), clip(String(error), 300), Number(id));
+  const apiKeyCount = () => q.keyList.all().length;
+
+  /* ---------- usage/cost scorecard (credits from the persisted exit events) ---------- */
+  function statsSummary() {
+    const C = "coalesce(json_extract(result,'$.credits'),0)";
+    const round = n => Math.round((Number(n) || 0) * 10000) / 10000;
+    const totals = db.prepare(`SELECT count(*) AS runs, sum(CASE WHEN status IN ('error','timeout','interrupted') THEN 1 ELSE 0 END) AS errors, coalesce(sum(${C}),0) AS credits, coalesce(sum(duration_ms),0) AS durationMs FROM runs WHERE status != 'running'`).get();
+    const byAgent = db.prepare(`SELECT agent_id AS agentId, count(*) AS runs, coalesce(sum(${C}),0) AS credits FROM runs WHERE status != 'running' GROUP BY agent_id ORDER BY credits DESC`).all();
+    const byDay = db.prepare(`SELECT substr(started_at,1,10) AS day, count(*) AS runs, coalesce(sum(${C}),0) AS credits FROM runs WHERE status != 'running' GROUP BY day ORDER BY day DESC LIMIT 30`).all();
+    const byProject = db.prepare(`SELECT project, count(*) AS runs, coalesce(sum(${C}),0) AS credits FROM runs WHERE status != 'running' GROUP BY project ORDER BY credits DESC LIMIT 50`).all();
+    const byFeature = db.prepare(`SELECT feature_id AS featureId, count(*) AS runs, coalesce(sum(${C}),0) AS credits FROM runs WHERE status != 'running' AND feature_id IS NOT NULL GROUP BY feature_id ORDER BY credits DESC LIMIT 50`).all();
+    totals.credits = round(totals.credits);
+    for (const row of [...byAgent, ...byDay, ...byProject, ...byFeature]) row.credits = round(row.credits);
+    return { totals, byAgent, byDay, byProject, byFeature };
+  }
+
+  /** Lexical search over the run history (FTS5). Returns [] if the index is unavailable. Terms are quoted to avoid FTS operator injection. */
+  function searchRuns(query, limit = 20) {
+    if (!fts) return [];
+    const terms = String(query || '').trim().split(/\s+/).filter(Boolean).slice(0, 20).map(w => '"' + w.replace(/"/g, '') + '"');
+    if (!terms.length) return [];
+    let hits; try { hits = fts.search.all(terms.join(' '), Math.min(Number(limit) || 20, 100)); } catch { return []; }
+    return hits.map(h => { const r = q.runGet.get(h.id); return r ? { id: h.id, snippet: h.snippet, label: r.label || '', agentId: r.agent_id, project: r.project, featureId: r.feature_id, startedAt: r.started_at, status: r.status } : null; }).filter(Boolean);
+  }
+
   return {
     file, migration, interrupted, runMeta,
     syncWorkspace, readWorkspace, backupWorkspace, listSnapshots, getSnapshot,
     saveRoom, loadRooms, saveChat, deleteChat, loadChats, sweep,
-    insertRun, appendRunEvents, finishRun, listRuns, getRun, runEvents,
+    insertRun, appendRunEvents, finishRun, listRuns, getRun, runEvents, statsSummary, searchRuns,
+    // API key pool
+    listApiKeys, addApiKey, removeApiKey, setApiKeyStatus, setApiKeyLabel, reorderApiKeys,
+    nextApiKey, markApiKeyOk, markApiKeyFail, apiKeyCount,
     close: () => db.close(),
   };
 }

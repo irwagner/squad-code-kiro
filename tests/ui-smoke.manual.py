@@ -21,6 +21,12 @@ with sync_playwright() as p:
     pg.wait_for_timeout(1500)
     api = pg.evaluate("() => !!(window.SquadCode && typeof window.SquadCode.getSnapshot === 'function')")
     opts = pg.evaluate("() => { openOpNew('UI Smoke'); const el = document.querySelector('#opNewTpl'); return el ? Array.from(el.options).map(o=>o.value) : []; }")
+    created = pg.evaluate("""() => { const sq = state.squads[0]; if(!sq) return {noSquad:true};
+        createOperation('UI Smoke SaaS', sq, null, 'saas');
+        const p = state.projects.find(x => x.name === 'UI Smoke SaaS');
+        if(!p) return {none:true};
+        const titles = p.features.map(f=>f.title);
+        return { count:p.features.length, hasSetup:p.features.some(f=>f.setup), hasBilling:titles.some(t=>/Billing/i.test(t)), briefingHas:/SaaS/i.test(p.briefing||'') }; }""")
     b.close()
 
 ok = True
@@ -31,6 +37,7 @@ def check(cond, msg):
 
 check(api, 'app bootou e expõe window.SquadCode.getSnapshot')
 check(set(['system','saas','lab','pentest']).issubset(set(opts)), 'seletor de templates com system/saas/lab/pentest, got ' + str(opts))
+check(bool(created.get('hasSetup')) and bool(created.get('hasBilling')) and bool(created.get('briefingHas')), 'template saas cria features (setup+billing) e preenche briefing, got ' + str(created))
 check(len(errors) == 0, 'sem erros de console/página (%d)' % len(errors))
 for e in errors[:10]:
     print('  -', e[:160])

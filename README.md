@@ -427,6 +427,12 @@ O [**Guia completo**](docs/GUIA.md) detalha todas as funcionalidades:
 - [Mapa da squad: cidade hexagonal e escritório](docs/GUIA.md#️-tela-squad-cidade-hexagonal)
 - [Controles e atalhos](docs/GUIA.md#-controles)
 
+Outros documentos deste projeto:
+- [Add-ons e roadmap](docs/ADDONS.md) — recursos nativos do Kiro, MCP, scorecard de custo, memória FTS5, auto-commit, worktree/branches e resume.
+- [Templates de operação](docs/TEMPLATES.md) — blueprints prontos (Sistema, SaaS, Lab, Pentest).
+- [Squads de agentes](.kiro/agents/README.md) — presets `.kiro/agents` e o modelo de segurança do pentest.
+- [KIRO.md](KIRO.md) e [AGENTS.md](AGENTS.md) — guia do repositório e contexto dos agentes.
+
 Links úteis do Kiro CLI: [instalação](https://kiro.dev/docs/cli/setup/) ·
 [página do CLI](https://kiro.dev/cli/) ·
 [kiro.dev](https://kiro.dev/)

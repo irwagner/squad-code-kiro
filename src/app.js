@@ -3170,8 +3170,9 @@ function parseSquadJson(raw){
  const b=s.indexOf('{'),e=s.lastIndexOf('}');if(b<0||e<=b)return null;
  try{const o=JSON.parse(s.slice(b,e+1));return o&&Array.isArray(o.operators)?o:null;}catch{return null;}
 }
-async function llmSquadSpec(brief){
- const started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:autoSquadPrompt(brief),label:'Desenho de squad',options:{project:project().folder,trustAll:true,timeoutSec:180}})});
+async function llmSquadSpec(brief,model){
+ const opts={project:project().folder,trustAll:true,timeoutSec:180};if(model&&model!=='inherit')opts.model=model;
+ const started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:autoSquadPrompt(brief),label:'Desenho de squad',options:opts})});
  const exit=await streamRun(started.runId,()=>{});
  if(exit.isError)throw new Error(exit.error||'Falha ao desenhar a squad.');
  const spec=parseSquadJson(exit.result||'');
@@ -3205,7 +3206,8 @@ function autoPreviewAgent(ref){
  if(ref&&typeof ref==='object')return{name:String(ref.name||ROLES[ref.role]?.name||'AGENTE'),label:(ROLES[ref.role]?.label||ref.role||'')+(ref.specialty?' / '+ref.specialty:''),model:ref.model||''};
  return{name:'?',label:'',model:''};
 }
-function openAutoSquad(){if(!guardMutation())return;ui.autoSquad={brief:'',spec:null,busy:false,error:''};renderAutoSquad();}
+function autoModelSelect(cur){return`<div class="field" style="margin-top:10px"><label for="autoModel"><span class="label-ico">🧠</span>LLM QUE MONTA A SQUAD</label><select id="autoModel" name="autoModel">${KIRO_MODELS.map(([g,items])=>`<optgroup label="${E(g)}">${items.map(([id,label])=>`<option value="${E(id)}" ${cur===id?'selected':''}>${E(label)}${(id==='inherit'||id==='auto')?'':' · '+E(id)}</option>`).join('')}</optgroup>`).join('')}</select><span class="hint">A IA usa este modelo só para montar a squad; cada agente mantém o próprio modelo.</span></div>`;}
+function openAutoSquad(){if(!guardMutation())return;ui.autoSquad={brief:'',spec:null,busy:false,error:'',model:runtime().model||'auto'};renderAutoSquad();}
 function renderAutoSquad(){
  const s=ui.autoSquad;if(!s)return;
  const mode=liveMode()?'A IA do Kiro vai desenhar a squad a partir do seu pedido.':'Sem o bridge conectado: montagem por heurística (palavras-chave). Conecte o Kiro CLI para o desenho por IA.';
@@ -3213,19 +3215,19 @@ function renderAutoSquad(){
  if(s.busy){body=`<div class="confirm-copy">${icon('sparkle')} Montando a squad…</div><p class="hint">${liveMode()?'A IA está escolhendo os especialistas certos para o seu pedido.':'Analisando o seu pedido…'}</p>`;footer='';}
  else if(s.spec){
   const sp=s.spec,row=(r,ref)=>{const a=autoPreviewAgent(ref);return`<li style="margin:.25em 0"><b>${E(r)}:</b> ${E(a.name)} <span class="hint">— ${E(a.label)}${a.model?' · '+E(a.model):''}</span></li>`;};
-  body=`<div class="eyebrow">SQUAD PROPOSTA</div><h3 style="margin:.2em 0 .1em">${E(autoUniqueName(sp.name))}</h3>${sp.rationale?`<p class="hint" style="margin:.1em 0 .6em">${E(String(sp.rationale).slice(0,300))}</p>`:''}${s.error?`<p class="hint" style="color:#f0a37a">${E(s.error)}</p>`:''}<ul style="list-style:none;padding:0;margin:.3em 0">${row('Comandante',sp.commander)}${row('ADR',sp.adr)}${row('PRD',sp.prd)}${(sp.operators||[]).map(o=>row('Operador',o)).join('')}</ul><p class="hint">Isto cria a squad e recruta os agentes que faltarem. Depois você ajusta tudo no Squad Studio.</p>`;
+  body=`<div class="eyebrow">SQUAD PROPOSTA</div><h3 style="margin:.2em 0 .1em">${E(autoUniqueName(sp.name))}</h3>${liveMode()&&!s.error?`<p class="hint" style="margin:.1em 0 .3em">${icon('sparkle')} Desenhada por ${E(modelLabel(s.model))}</p>`:''}${sp.rationale?`<p class="hint" style="margin:.1em 0 .6em">${E(String(sp.rationale).slice(0,300))}</p>`:''}${s.error?`<p class="hint" style="color:#f0a37a">${E(s.error)}</p>`:''}<ul style="list-style:none;padding:0;margin:.3em 0">${row('Comandante',sp.commander)}${row('ADR',sp.adr)}${row('PRD',sp.prd)}${(sp.operators||[]).map(o=>row('Operador',o)).join('')}</ul><p class="hint">Isto cria a squad e recruta os agentes que faltarem. Depois você ajusta tudo no Squad Studio.</p>`;
   footer=`${cancelButton}<button class="btn" type="button" data-action="auto-redo">${icon('radio')}Refazer</button><button class="btn primary" type="button" data-action="auto-create">${icon('check')}Criar squad</button>`;
  }else{
-  body=`<label class="eyebrow" for="autoBrief">DESCREVA, COM SUAS PALAVRAS, O QUE QUER CONSTRUIR</label><textarea id="autoBrief" rows="5" style="width:100%;margin-top:6px" placeholder="Ex.: quero um app de delivery com cardápio, carrinho, pagamento e um painel para o restaurante" maxlength="4000">${E(s.brief||'')}</textarea><p class="hint" style="margin-top:8px">${icon('sparkle')} ${E(mode)}</p>`;
+  body=`<label class="eyebrow" for="autoBrief">DESCREVA, COM SUAS PALAVRAS, O QUE QUER CONSTRUIR</label><textarea id="autoBrief" rows="5" style="width:100%;margin-top:6px" placeholder="Ex.: quero um app de delivery com cardápio, carrinho, pagamento e um painel para o restaurante" maxlength="4000">${E(s.brief||'')}</textarea>${liveMode()?autoModelSelect(s.model||'auto'):''}<p class="hint" style="margin-top:8px">${icon('sparkle')} ${E(mode)}</p>`;
   footer=`${cancelButton}<button class="btn primary" type="button" data-action="auto-build">${icon('sparkle')}Montar squad</button>`;
  }
  showModal('MONTAR SQUAD AUTOMÁTICO','SQUAD CODE / AUTO',body,footer,'narrow','auto-squad');
 }
 async function autoSquadGo(){
- const s=ui.autoSquad;if(!s)return;const brief=String($('#autoBrief')?.value??s.brief).trim();s.brief=brief;
+ const s=ui.autoSquad;if(!s)return;const brief=String($('#autoBrief')?.value??s.brief).trim();s.brief=brief;s.model=$('#autoModel')?.value||s.model||'auto';
  if(!brief)return toast('Descreva o que você quer construir.','error');
  s.busy=true;s.error='';renderAutoSquad();
- try{s.spec=liveMode()?await llmSquadSpec(brief):heuristicSquadSpec(brief);}
+ try{s.spec=liveMode()?await llmSquadSpec(brief,s.model):heuristicSquadSpec(brief);}
  catch(e){s.spec=heuristicSquadSpec(brief);s.error='IA indisponível — usei a heurística. ('+String(e.message||e).slice(0,160)+')';}
  if(ui.modal!=='auto-squad'||!ui.autoSquad)return;s.busy=false;renderAutoSquad();
 }

@@ -33,9 +33,18 @@ def main():
           const q=state.squads[state.squads.length-1];
           return {grew:state.squads.length-before, missing:q?squadMissing(q):['sem squad'], members:(q&&q.agentIds||[]).length, view:ui.view, modal:ui.modal};
         }""")
+        # create-from-scratch: an operator given as a custom object must become a brand-new agent
+        custom = pg.evaluate("""()=>{
+          const beforeA=state.agents.length;
+          const spec={name:'SQUAD FORJA ZERO',commander:'VANGUARD',adr:'ATLAS',prd:'ECHO',operators:[{role:'backend',specialty:'Rust / Actix',model:'',name:'FERRO',prompt:'Voce implementa servicos em Rust com Actix e testes.'},'SENTINEL']};
+          const q=buildSquadFromSpec(spec);
+          const ferro=state.agents.find(a=>a.name==='FERRO');
+          return {agentsGrew:state.agents.length-beforeA, ferroRole:ferro&&ferro.role, ferroSpec:ferro&&ferro.specialty, ferroCustomPrompt:!!(ferro&&/Rust/i.test(ferro.prompt||'')), missing:q?squadMissing(q):['sem squad']};
+        }""")
         b.close()
-    ok = (not errors) and created['grew'] == 1 and created['missing'] == [] and created['members'] >= 5 and created['view'] == 'squads'
-    print(f"AUTO-SQUAD: {'OK' if ok else 'FAIL'} ops={spec.get('ops')} missing={created['missing']} members={created['members']} errors={errors[:3]}")
+    ok = (not errors) and created['grew'] == 1 and created['missing'] == [] and created['members'] >= 5 and created['view'] == 'squads' \
+        and custom['ferroRole'] == 'backend' and custom['ferroCustomPrompt'] and custom['missing'] == []
+    print(f"AUTO-SQUAD: {'OK' if ok else 'FAIL'} ops={spec.get('ops')} missing={created['missing']} members={created['members']} custom={custom} errors={errors[:3]}")
     return 0 if ok else 1
 
 

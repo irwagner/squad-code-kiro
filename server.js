@@ -169,6 +169,32 @@ function autoCommit(dir, message) {
   }).catch(e => ({ ok: false, error: e.message }));
 }
 
+/** Set up an isolated git worktree + branch (squad/<id>) for a run, so parallel steps don't collide. Returns
+ *  {projectDir, dir, branch} or null on any failure (caller falls back to the project folder). Creates an empty initial commit
+ *  if the repo has none (worktree add needs a base commit). */
+async function setupWorktree(projectDir, id) {
+  if (gitMissing) return null;
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: gitCeiling() };
+  const gitRun = args => new Promise(resolve => execFile('git', args, { cwd: projectDir, windowsHide: true, timeout: 20000, env }, (err, out, serr) => resolve({ err, out: String(out || '') + String(serr || '') })));
+  try {
+    const head = await gitRun(['rev-parse', '--verify', '-q', 'HEAD']);
+    if (head.err) await gitRun(['-c', 'user.name=squad-code-kiro', '-c', 'user.email=squad-code-kiro@local', 'commit', '--allow-empty', '-q', '-m', 'init']);
+    const short = String(id).slice(0, 8);
+    const branch = `squad/${short}`;
+    const dir = path.join(PROJECTS_DIR, '.worktrees', `${path.basename(projectDir)}-${short}`);
+    const add = await gitRun(['worktree', 'add', '-b', branch, dir]);
+    if (add.err) { console.warn(`git worktree add falhou: ${add.out.slice(-200)}`); return null; }
+    return { projectDir, dir, branch };
+  } catch (e) { console.warn(`setupWorktree: ${e.message}`); return null; }
+}
+
+/** Remove a run's worktree (the branch and its commits persist). Never rejects. */
+function removeWorktree(projectDir, dir) {
+  if (gitMissing || !dir) return Promise.resolve();
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: gitCeiling() };
+  return new Promise(resolve => execFile('git', ['worktree', 'remove', '--force', dir], { cwd: projectDir, windowsHide: true, timeout: 20000, env }, () => resolve()));
+}
+
 /** Folder of a project under PROJECTS_DIR; the name is a plain slug, so it cannot leave the root. */
 function projectDir(name) {
   const folder = String(name || '').trim();
@@ -337,6 +363,7 @@ function validateRunOptions(o = {}) {
   // Kiro engine options: map the UI's fields to the kiro-cli flags. `agent` selects a native Kiro agent (.kiro/agents/<name>).
   // `trustTools` (optional array) restricts trust; omitted => trust-all (headless squad execution needs tools without prompts).
   out.autoCommit = o.autoCommit === true;
+  out.worktree = o.worktree === true;
   out.kiro = kiroEngine.validateKiroOptions({
     agent: typeof o.agent === 'string' && o.agent.trim() ? o.agent.trim() : undefined,
     model: o.model || undefined,
@@ -388,9 +415,12 @@ async function startRun(body) {
   if (creditBudget > 0 && sessionCredits >= creditBudget) throw Object.assign(new Error(`Orçamento de créditos da sessão atingido (${round4(sessionCredits)} de ${creditBudget}). Ajuste nas configurações ou reinicie o bridge.`), { status: 429 });
   const resolved = await resolveBin(opts.claudePath);
   if (!resolved) throw new Error(`Kiro CLI não encontrado ("${opts.claudePath}"). Ajuste o caminho nas configurações ou instale o kiro-cli.`);
-  if (opts.projectRun) await ensureProjectRepo(opts.cwd);
-
   const id = crypto.randomUUID();
+  let worktree = null;
+  if (opts.projectRun) {
+    await ensureProjectRepo(opts.cwd);
+    if (opts.worktree) { worktree = await setupWorktree(opts.cwd, id); if (worktree) opts.cwd = worktree.dir; }
+  }
   // Kiro CLI takes the prompt as a positional argument. A system prompt (if any) is prepended to the prompt text, since Kiro has
   // no --append-system-prompt-file. We keep it bounded.
   const fullPrompt = systemPrompt.trim() ? `${systemPrompt.trim()}\n\n---\n\n${prompt}` : prompt;
@@ -405,7 +435,7 @@ async function startRun(body) {
     meta: dbModule.runMeta(body.meta), project: typeof body.options?.project === 'string' ? body.options.project.slice(0, 80) : '',
     persist: !!store, saved: 0, pending: [], flushTimer: null,
     // Rotation bookkeeping.
-    keyAttempts: [], credits: 0,
+    keyAttempts: [], credits: 0, worktree,
   };
   runs.set(id, run);
   if (run.persist) try { store.insertRun(run); } catch (e) { run.persist = false; console.warn(`Histórico da execução ${id} não gravado: ${e.message}`); }
@@ -453,8 +483,8 @@ async function runWithRotation(run, resolved, kiroArgs, opts) {
     if (attemptResult.ok) {
       if (picked) { try { store.markApiKeyOk(picked.id, credits); } catch {} }
       run.credits += credits;
-      if (opts.autoCommit && opts.projectRun && !run.cancelled && !run.timedOut) {
-        try { const c = await autoCommit(opts.cwd, `[squad] ${run.label || 'etapa'}`); pushEvent(run, { type: 'bridge', subtype: 'commit', ok: !!c.ok, nothing: !!c.nothing, error: c.error || null }); } catch {}
+      if ((opts.autoCommit || opts.worktree) && opts.projectRun && !run.cancelled && !run.timedOut) {
+        try { const c = await autoCommit(opts.cwd, `[squad] ${run.label || 'etapa'}`); pushEvent(run, { type: 'bridge', subtype: 'commit', ok: !!c.ok, nothing: !!c.nothing, branch: run.worktree ? run.worktree.branch : null, error: c.error || null }); } catch {}
       }
       return finalizeRun(run, attemptResult);
     }
@@ -549,6 +579,7 @@ function finalizeRun(run, { code, stderrTail, converter }) {
   for (const res of run.clients) res.end();
   run.clients.clear();
   run.child = null;
+  if (run.worktree) removeWorktree(run.worktree.projectDir, run.worktree.dir).catch(() => {});
   setTimeout(() => runs.delete(run.id), 30 * 60 * 1000).unref();
   return run;
 }

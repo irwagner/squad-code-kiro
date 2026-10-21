@@ -12,6 +12,7 @@
     "test:e2e": "node tests/e2e-smoke.manual.cjs",
     "test:resume": "node tests/resume.manual.cjs",
     "test:ui": "python tests/ui-smoke.manual.py",
+    "test:parallel": "python tests/parallel.manual.py",
     "agents:validate": "node scripts/validate-agents.mjs"
   },
   "engines": {

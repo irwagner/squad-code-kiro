@@ -514,14 +514,17 @@ state.agents.forEach(a=>{const k=templateAvatarKey(a);if(k&&a.image&&[TEMPLATE_A
 [['ABELHA-RAINHA','queen','bee'],['ZERO','radio','zero'],['VANILLA','html','js'],['PIPELINE','flow','git'],['SCALPEL','check','flask'],['WARDEN','shield','bug']].forEach(([name,from,to])=>state.agents.forEach(a=>{if(a.name===name&&a.icon===from)a.icon=to;}));
 const ui={dismissedId:null,squadSel:null,squadDraft:null,squadPick:null,squadSlotPending:null,squadFlash:null,opsNew:null,opsFeature:null,opsFeatureDraft:null,opsPlan:null,opsFeatView:'list',opsLast:{scope:'fullstack',priority:'P1',sprintId:''},sprintOpen:{},selectedId:state.projects.find(p=>p.id===state.projectId)?.commanderId||state.agents[0]?.id,view:'home',lastView:'home',focus:false,modal:null,returnFocus:null,draft:null,pendingPlan:null,confirm:null,featureQuery:'',logFilter:'all',bridge:{online:false,checked:false,version:null,error:null},opsChat:{open:false,min:false,unread:0,pid:''},consoles:[],consoleId:null,settingsTab:'workspace',settingsScope:'user',settingsFile:null};
 if(bootMemory?.chats){ui.featureChats=bootMemory.chats.feature||{};ui.agentChats=bootMemory.chats.agent||{};ui.docChats=bootMemory.chats.doc||{};}
-let runner=null,timer=null;
+let runner=null,timer=null;const laneTimers={};
+function clearLanes(){clearTimeout(timer);for(const k in laneTimers){clearTimeout(laneTimers[k]);delete laneTimers[k];}}
 const project=()=>state.projects.find(p=>p.id===state.projectId)||state.projects[0];
 const agentById=id=>state.agents.find(a=>a.id===id);
 const featureById=id=>project().features.find(f=>f.id===id);
 const squad=()=>project().agentIds.map(agentById).filter(Boolean);
 const autoPortrait=a=>templatePortrait(a)||rolePortrait(a.role);
 const portrait=a=>a.image||autoPortrait(a);
-const activeFeature=()=>runner?project().features.find(f=>f.id===runner.featureId):null;
+const activeFeatures=()=>(runner&&runner.lanes)?runner.lanes.map(id=>project().features.find(f=>f.id===id)).filter(Boolean):[];
+const activeFeature=()=>activeFeatures()[0]||null;
+const laneLimit=()=>((runner&&runner.single)||liveMode())?1:Math.max(1,Math.min(8,Number(runtime().concurrency)||1));
 const activeAgent=()=>activeFeature()?.currentAgentId;
 const stageMeta=stage=>AGENT_STAGES[stage]||AGENT_STAGES.discovery;
 const portraitChoices=()=>[...Object.keys(PORTRAITS).filter(key=>ROLES[key]).map(key=>({key,label:ROLES[key].label,short:ROLES[key].short,src:PORTRAITS[key]})),...AVATARS.map(({key,label})=>({key,label,short:label,src:PORTRAITS[key]}))];
@@ -601,7 +604,7 @@ function nodeLinks(){
   const defaults=['po','architect','backend','frontend','qa'].map(role=>squad().find(a=>a.role===role)?.id).filter(Boolean),chain=[p.commanderId,...defaults].filter(Boolean);
   chain.slice(1).forEach((to,i)=>add(chain[i],to));p.features.forEach(f=>f.route.slice(1).forEach((to,i)=>add(f.route[i],to)));p.handoffs.slice(-12).forEach(h=>add(h.from,h.to));
  }else squad().filter(a=>a.id!==p.commanderId).forEach(a=>add(effectiveLink(a,p),a.id));
- if(runner){const f=activeFeature();if(f)add(f.step>0?f.route[f.step-1]:p.commanderId,f.currentAgentId,!runner.paused);}
+ if(runner){for(const f of activeFeatures())add(f.step>0?f.route[f.step-1]:p.commanderId,f.currentAgentId,!runner.paused);}
  return result;
 }
 function render(){
@@ -2461,13 +2464,13 @@ window.addEventListener('beforeunload',event=>{if(runner&&liveMode()){event.prev
 
 /* Sequential simulator. Human review is a separate state transition. */
 // In the demo, while the office is watched, the next beat also waits (at most 9 s more) until nobody is still walking to an errand.
-function scheduleStep(callback,ms=state.settings.stepMs){clearTimeout(timer);const t0=Date.now(),go=()=>{if(!runner||runner.paused||runner.phase!=='running')return;if(!liveMode()&&Date.now()-t0<ms+9000&&!officeSettled()){timer=setTimeout(go,200);return;}callback();};timer=setTimeout(go,ms);}
+function scheduleStep(callback,ms=state.settings.stepMs,fid=null){const key=fid||'_';clearTimeout(laneTimers[key]);const t0=Date.now(),go=()=>{if(!runner||runner.paused||runner.phase!=='running')return;if(!liveMode()&&Date.now()-t0<ms+9000&&!officeSettled()){laneTimers[key]=setTimeout(go,200);return;}callback();};laneTimers[key]=setTimeout(go,ms);}
 // Runs are scoped: a whole sprint (default: the current sprint) or a single feature with its full route.
 // Every run starts with the commander planning it in the operation room; nothing executes before the person approves the plan.
 function startRun(scope=null){
  if(runner){
   if(runner.phase==='awaiting')return roomApprove();if(runner.phase==='planning'){if(!opsChatOn()||ui.opsChat.min)openOpsChat();return toast('O comandante ainda está montando o plano.');}
-  runner.paused=!runner.paused;clearTimeout(timer);log(runner.paused?'Simulação pausada pelo operador.':'Simulação retomada.','system');roomPush({kind:'system',text:runner.paused?(runner.inFlight?'Pausa pedida: o agente termina a etapa em andamento e a squad para.':'Execução pausada pelo operador.'):'Execução retomada.'});if(!runner.paused&&!runner.runId&&!runner.inFlight)scheduleStep(runner.featureId?simulationStep:launchNext);if(runner.paused&&runner.inFlight)toast('O agente atual termina a etapa em andamento antes de pausar.');save();render();if(ui.modal==='features')openFeatures();return;
+  runner.paused=!runner.paused;clearLanes();log(runner.paused?'Simulação pausada pelo operador.':'Simulação retomada.','system');roomPush({kind:'system',text:runner.paused?(runner.inFlight?'Pausa pedida: o agente termina a etapa em andamento e a squad para.':'Execução pausada pelo operador.'):'Execução retomada.'});if(!runner.paused&&!runner.runId&&!runner.inFlight){if(runner.lanes&&runner.lanes.length)runner.lanes.forEach(fid=>scheduleStep(()=>simulationStep(fid),state.settings.stepMs,fid));else scheduleStep(launchNext);}if(runner.paused&&runner.inFlight)toast('O agente atual termina a etapa em andamento antes de pausar.');save();render();if(ui.modal==='features')openFeatures();return;
  }
  if(!runGate())return;refreshBlocked();const p=project();if(scope?.featureId)return startFeatureRun(featureById(scope.featureId));
  const s=sprintById(scope?.sprintId,p)||currentSprint(p);if(!s)return toast('Crie uma sprint antes de executar.','error');
@@ -2480,29 +2483,31 @@ function startFeatureRun(f){
  if(!f)return;if(f.status==='done')return toast(`${f.key} já foi concluída.`);if(f.status==='review')return openReview(f.id);if(!depsReady(f))return toast(blockedWhy(f),'error');
  beginPlan({featureId:null,paused:false,single:true,sprintId:sprintOf(f)?.id||'',kind:'feature',label:f.key,onlyId:f.id},`${f.key} iniciada individualmente`,[f]);
 }
-function beginRun(r,what){runner=r;r.roomSeq=roomOf().seq;if(liveMode()){log(`${what} com o Kiro CLI ${ui.bridge.version} (kiro-cli).`,'system');project().logs.at(-1).simulated=false;}else log(`${what} em modo demonstracao. Nenhum processo do Kiro CLI foi criado.`,'system');closeModal();}
+function beginRun(r,what){runner=r;r.lanes=[];r.sims={};r.flight={};r.roomSeq=roomOf().seq;if(liveMode()){log(`${what} com o Kiro CLI ${ui.bridge.version} (kiro-cli).`,'system');project().logs.at(-1).simulated=false;}else log(`${what} em modo demonstracao. Nenhum processo do Kiro CLI foi criado.`,'system');closeModal();}
 function pendingDeps(f,p=project()){return f.dependencies.map(id=>p.features.find(x=>x.id===id)).filter(d=>d&&d.status!=='done');}
 function blockedWhy(f,p=project()){const deps=pendingDeps(f,p);return deps.length?`${f.key} aguarda ${deps.map(d=>`${d.key} (${sprintOf(d,p)?.name||'sem sprint'})`).join(', ')}.`:`${f.key} está bloqueada.`;}
 function launchNext(preferredId=null){
- if(!runner||runner.paused||runner.phase!=='running')return;refreshBlocked();const p=project(),cmdId=p.commanderId;
- const f=preferredId?featureById(preferredId):p.features.filter(f=>f.status==='ready'&&f.route.length&&depsReady(f)&&(!runner.sprintId||sprintOf(f)?.id===runner.sprintId)).sort((a,b)=>a.priority.localeCompare(b.priority))[0];
- if(!f||!f.route.length||!depsReady(f)||f.status!=='ready'){
-  const s=runner.kind==='sprint'?sprintById(runner.sprintId):null,tag=s?`${s.name}: `:'',scopeFs=s?sprintFeatures(s):[f].filter(Boolean),inReview=scopeFs.filter(x=>x.status==='review'),left=scopeFs.filter(x=>['backlog','ready','blocked'].includes(x.status));runner=null;clearTimeout(timer);const review=inReview.length;
-  roomTyping(null);roomPush({kind:'say',agentId:cmdId,text:`${s?`${s.name} fechou esta rodada.`:'Fim da execução.'}${review?` ${inReview.map(x=>x.key).join(', ')} ${review>1?'aguardam':'aguarda'} a sua revisão.`:''}${left.length?` Ficam para depois: ${left.map(x=>`${x.key} (${STATUS[x.status].toLowerCase()})`).join(', ')}.`:''}${!review&&!left.length?' Nada pendente por aqui.':''}`});
-  log(s?tag+(review?'execução aguardando revisão humana.':'nenhuma feature pronta para executar.'):review?'Execução simulada aguardando revisão humana.':'Nenhuma feature pronta para simular.','system');save();render();refreshFeatureModal();toast(s?tag+(review?'entregas aguardam sua revisão.':'fila da sprint encerrada.'):review?'Entregas aguardam sua revisão na tela de Features.':'Fila da simulação encerrada.');return;
+ if(!runner||runner.paused||runner.phase!=='running')return;refreshBlocked();const p=project(),cmdId=p.commanderId,limit=laneLimit();let startedAny=false;
+ while(runner.lanes.length<limit){
+  const f=(preferredId&&!runner.lanes.length)?featureById(preferredId):p.features.filter(x=>x.status==='ready'&&x.route.length&&depsReady(x)&&!runner.lanes.includes(x.id)&&(!runner.sprintId||sprintOf(x)?.id===runner.sprintId)).sort((a,b)=>a.priority.localeCompare(b.priority))[0];
+  if(!f||!f.route.length||!depsReady(f)||f.status!=='ready')break;
+  if(!f.route.every(id=>p.agentIds.includes(id)&&agentById(id))){f.route=[];f.briefs=[];f.status='backlog';roomTyping(null);roomPush({kind:'system',text:`A rota da ${f.key} tem um agente que saiu da squad. Redistribua a feature.`,tone:'error'});continue;}
+  f.status='running';f.step=0;f.currentAgentId=f.route[0];f.runStart=f.outputs.length;runner.lanes.push(f.id);startedAny=true;
+  log(`${agentById(cmdId)?.name||'COMANDANTE'} atribuiu ${f.key} a ${agentById(f.currentAgentId).name}.`,'plan',cmdId);log(`${f.key}: briefing e contexto recebidos. Etapa 1/${f.route.length}.`,'agent',f.currentAgentId);
+  if(runner.kind!=='spawn')roomPush({kind:'say',agentId:cmdId,featureKey:f.key,ops:'brief',to:f.route[0],text:`${agentById(f.route[0]).name}, a ${f.key} (${f.title}) começa com você. Rota: ${f.route.map(id=>agentById(id)?.name).join(' > ')}.`});
+  roomStepStart(f,null);const fid=f.id;scheduleStep(()=>simulationStep(fid),state.settings.stepMs,fid);
  }
- if(!f.route.every(id=>p.agentIds.includes(id)&&agentById(id))){f.route=[];f.briefs=[];f.status='backlog';runner=null;roomTyping(null);roomPush({kind:'system',text:`A rota da ${f.key} tem um agente que saiu da squad. Redistribua a feature.`,tone:'error'});save();render();return toast('A rota contem um agente indisponível. Redistribua a feature.','error');}
- f.status='running';f.step=0;f.currentAgentId=f.route[0];f.runStart=f.outputs.length;runner.featureId=f.id;
- log(`${agentById(cmdId)?.name||'COMANDANTE'} atribuiu ${f.key} a ${agentById(f.currentAgentId).name}.`,'plan',cmdId);log(`${f.key}: briefing e contexto recebidos. Etapa 1/${f.route.length}.`,'agent',f.currentAgentId);
- if(runner.kind!=='spawn')roomPush({kind:'say',agentId:cmdId,featureKey:f.key,ops:'brief',to:f.route[0],text:`${agentById(f.route[0]).name}, a ${f.key} (${f.title}) começa com você. Rota: ${f.route.map(id=>agentById(id)?.name).join(' > ')}.`});
- roomStepStart(f,null);save();render();refreshFeatureModal();scheduleStep(simulationStep);
+ if(runner.lanes.length){if(startedAny){save();render();refreshFeatureModal();}return;}
+ const s=runner.kind==='sprint'?sprintById(runner.sprintId):null,tag=s?`${s.name}: `:'',scopeFs=s?sprintFeatures(s):[],inReview=scopeFs.filter(x=>x.status==='review'),left=scopeFs.filter(x=>['backlog','ready','blocked'].includes(x.status));clearLanes();runner=null;const review=inReview.length;
+ roomTyping(null);roomPush({kind:'say',agentId:cmdId,text:`${s?`${s.name} fechou esta rodada.`:'Fim da execução.'}${review?` ${inReview.map(x=>x.key).join(', ')} ${review>1?'aguardam':'aguarda'} a sua revisão.`:''}${left.length?` Ficam para depois: ${left.map(x=>`${x.key} (${STATUS[x.status].toLowerCase()})`).join(', ')}.`:''}${!review&&!left.length?' Nada pendente por aqui.':''}`});
+ log(s?tag+(review?'execução aguardando revisão humana.':'nenhuma feature pronta para executar.'):review?'Execução simulada aguardando revisão humana.':'Nenhuma feature pronta para simular.','system');save();render();refreshFeatureModal();toast(s?tag+(review?'entregas aguardam sua revisão.':'fila da sprint encerrada.'):review?'Entregas aguardam sua revisão na tela de Features.':'Fila da simulação encerrada.');
 }
-function simulationStep(){
- if(!runner||runner.paused||runner.phase!=='running')return;const f=activeFeature();if(!f){launchNext();return;}const a=agentById(f.currentAgentId);if(!a){stopRun();return;}
+function simulationStep(fid){
+ if(!runner||runner.paused||runner.phase!=='running')return;const f=fid?featureById(fid):activeFeature();if(!f||!runner.lanes.includes(f.id))return;const a=agentById(f.currentAgentId);if(!a)return;
  if(liveMode())return liveStep(f,a);
- let s=runner.sim;if(!s||s.fid!==f.id||s.aid!==a.id||s.step!==f.step)s=runner.sim=simBeats(f,a);
- while(s.i<s.beats.length-1){simBeat(s,s.beats[s.i++]);const w=officeLive();if(w)return scheduleStep(simulationStep,w==='office'?Math.max(400,state.settings.stepMs*.6):Math.max(350,state.settings.stepMs*.4));}
- runner.sim=null;
+ let s=runner.sims[f.id];if(!s||s.fid!==f.id||s.aid!==a.id||s.step!==f.step)s=runner.sims[f.id]=simBeats(f,a);
+ while(s.i<s.beats.length-1){simBeat(s,s.beats[s.i++]);const w=officeLive();if(w)return scheduleStep(()=>simulationStep(f.id),w==='office'?Math.max(400,state.settings.stepMs*.6):Math.max(350,state.settings.stepMs*.4),f.id);}
+ runner.sims[f.id]=null;
  const texts={po:'Escopo e critérios organizados para o handoff de requisitos.',architect:'Contratos e fronteiras de componentes organizados para orientar a implementação.',backend:'Plano de API, validações e persistência preparado.',frontend:'Estados de interface e pontos de integracao organizados.',qa:'Checklist de verificação preparado para revisão humana.',commander:'Briefing decomposto em responsabilidades para o squad.'};
  const text=`[SIMULAÇÃO / SEM CÓDIGO EXECUTADO]\n${texts[roleFamilyOf(a)]||texts[a.role]||'Parte da especialidade organizada para o próximo agente.'}\n\nFeature: ${f.title}\nCriterios: ${f.criteria}\n\nEste e um registro ilustrativo. Nenhum arquivo foi escrito, teste executado ou resultado real verificado.`;
  f.outputs.push({agentId:a.id,at:nowISO(),text,simulated:true,error:false,costUsd:null,durationMs:null,sessionId:null});if(f.outputs.length>300)f.outputs.shift();
@@ -2512,10 +2517,10 @@ function simulationStep(){
 function advanceRoute(f,a,text,real){
  const p=project(),mark=()=>{if(real)p.logs.at(-1).simulated=false;};
  if(f.step+1<f.route.length){const next=f.route[f.step+1];recordHandoff(a.id,next,f,real?text:`${text}\n\nContexto anterior: ${f.context.slice(0,1000)}`);if(real)p.handoffs.at(-1).simulated=false;mark();f.step++;f.currentAgentId=next;log(`${f.key}: etapa ${f.step+1}/${f.route.length} iniciada${real?'':' na demonstracao'}.`,'agent',next);mark();
-  roomTyping(null);roomPush({kind:'baton',from:a.id,to:next,featureKey:f.key,text,simulated:!real});roomStepStart(f,a.id);save();render();refreshFeatureModal();scheduleStep(simulationStep);}
- else{f.status='review';f.currentAgentId=null;runner.featureId=null;log(`${f.key} enviada para revisão humana. Nenhuma entrega foi aprovada automaticamente.`,'review',a.id);mark();const single=runner.single,kind=runner.kind;
+  roomTyping(null);roomPush({kind:'baton',from:a.id,to:next,featureKey:f.key,text,simulated:!real});roomStepStart(f,a.id);save();render();refreshFeatureModal();scheduleStep(()=>simulationStep(f.id),state.settings.stepMs,f.id);}
+ else{f.status='review';f.currentAgentId=null;runner.lanes=runner.lanes.filter(id=>id!==f.id);delete runner.sims[f.id];delete runner.flight[f.id];clearTimeout(laneTimers[f.id]);delete laneTimers[f.id];log(`${f.key} enviada para revisão humana. Nenhuma entrega foi aprovada automaticamente.`,'review',a.id);mark();const single=runner.single,kind=runner.kind;
   roomTyping(null);roomPush({kind:'baton',from:a.id,to:null,featureKey:f.key,text,simulated:!real,spawn:kind==='spawn'});if(kind!=='spawn')roomPush({kind:'say',agentId:p.commanderId,featureKey:f.key,text:`${f.key} fechou a rota. A entrega está com você para revisão; aprovar libera quem depende dela.`});roomPush({kind:'review',featureId:f.id,featureKey:f.key});
-  save();render();refreshFeatureModal();if(single){runner=null;save();render();toast(kind==='feature'?`${f.key} ${real?'concluída':'concluída na simulação'}. Revise a entrega.`:real?'Spawn concluído. Revise a entrega na tela de Features.':'Spawn simulado concluído. Revise a entrega na tela de Features.');}else scheduleStep(launchNext);}
+  save();render();refreshFeatureModal();if(single){runner=null;save();render();toast(kind==='feature'?`${f.key} ${real?'concluída':'concluída na simulação'}. Revise a entrega.`:real?'Spawn concluído. Revise a entrega na tela de Features.':'Spawn simulado concluído. Revise a entrega na tela de Features.');}else launchNext();}
 }
 async function liveStep(f,a){
  const owner=runner,p=project();if(owner.inFlight)return;owner.inFlight=true;render();
@@ -2524,7 +2529,7 @@ async function liveStep(f,a){
  if(exit.error||exit.isError){
   const message=exit.error||'Falha na execução do Kiro CLI.';
   f.outputs.push({agentId:a.id,at:nowISO(),text:`[FALHA] ${message}`,simulated:false,error:true,costUsd:exit.costUsd??null,durationMs:null,sessionId:exit.sessionId??null});
-  f.status='ready';f.currentAgentId=null;f.step=0;runner=null;clearTimeout(timer);
+  f.status='ready';f.currentAgentId=null;f.step=0;runner=null;clearLanes();
   log(`${a.name} falhou em ${f.key}: ${message.slice(0,400)}. A feature voltou para Prontas.`,'agent',a.id,p);p.logs.at(-1).simulated=false;
   roomTyping(null);roomPush({kind:'say',agentId:a.id,featureKey:f.key,text:`Não consegui concluir a ${f.key}: ${message.slice(0,600)}`,error:true});roomPush({kind:'system',text:`${f.key} voltou para Prontas e a execução parou.`,tone:'error'});
   save();render();refreshFeatureModal();refreshConsole();toast(`${a.name} falhou: ${message.slice(0,160)}`,'error');return;
@@ -2537,10 +2542,10 @@ async function liveStep(f,a){
  advanceRoute(f,a,text,true);
 }
 function stopRun(){
- if(!runner)return;clearTimeout(timer);const planning=['planning','awaiting'].includes(runner.phase);
+ if(!runner)return;clearLanes();const planning=['planning','awaiting'].includes(runner.phase);
  for(const id of [runner.runId,runner.planRunId])if(id)bridgeFetch(`/api/runs/${id}/cancel`,{method:'POST'}).catch(error=>toast(error.message,'error'));
  const card=planning&&roomOf().messages.find(m=>m.id===runner.planMsgId);if(card){card.status='cancelled';roomUpdate(card);}
- const f=activeFeature();if(f){f.status='ready';f.currentAgentId=null;f.step=0;}runner=null;roomCalling.clear();
+ const f=activeFeature();for(const x of activeFeatures()){x.status='ready';x.currentAgentId=null;x.step=0;}clearLanes();runner=null;roomCalling.clear();
  for(const m of roomOf().messages)if(m.kind==='call'&&m.status==='open'){m.status='cancelled';roomUpdate(m);}
  roomTyping(null);roomPush({kind:'system',ops:'stop',text:planning?'Plano cancelado. Nenhuma feature foi alterada.':`Operação encerrada pelo operador.${f?` A ${f.key} voltou para Prontas.`:''}`,tone:'warn'});
  log(planning?'Plano cancelado pelo operador. Nenhuma feature foi alterada.':'Operação encerrada pelo operador. A feature interrompida volta para Prontas.','system');save();render();if(ui.modal==='features')openFeatures();refreshConsole();toast(planning?'Plano cancelado.':'Operação interrompida.');

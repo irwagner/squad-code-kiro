@@ -224,6 +224,17 @@ function deleteBranch(dir, branch) {
   return new Promise(res => execFile('git', ['branch', '-D', branch], { cwd: dir, windowsHide: true, timeout: 15000, env }, (err, out, serr) => res({ ok: !err, error: err ? (String(serr || '') + String(out || '')).slice(-300) : null })));
 }
 
+/** Unified diff a squad/<id> branch introduces vs the project's current HEAD (capped for the UI). */
+function branchDiff(dir, branch) {
+  if (gitMissing) return Promise.resolve({ ok: false, error: 'git indisponível' });
+  if (!SQUAD_BRANCH_RE.test(branch)) return Promise.resolve({ ok: false, error: 'branch inválido' });
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: gitCeiling() };
+  return new Promise(res => execFile('git', ['diff', `HEAD...${branch}`], { cwd: dir, windowsHide: true, timeout: 20000, maxBuffer: 4 * 1024 * 1024, env }, (err, out, serr) => {
+    if (err) return res({ ok: false, error: (String(serr || '') + String(out || '')).slice(-300) });
+    res({ ok: true, patch: String(out || '').slice(0, 60000) });
+  }));
+}
+
 /** Folder of a project under PROJECTS_DIR; the name is a plain slug, so it cannot leave the root. */
 function projectDir(name) {
   const folder = String(name || '').trim();
@@ -741,6 +752,11 @@ async function handle(req, res) {
       let dir; try { dir = projectDir(url.searchParams.get('project') || ''); } catch (e) { return fail(res, 400, e.message); }
       if (!fs.existsSync(path.join(dir, '.git'))) return json(res, 200, { ok: true, branches: [] });
       return json(res, 200, { ok: true, branches: await listBranches(dir) });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/branches/diff') {
+      let dir; try { dir = projectDir(url.searchParams.get('project') || ''); } catch (e) { return fail(res, 400, e.message); }
+      const r = await branchDiff(dir, String(url.searchParams.get('branch') || ''));
+      return json(res, r.ok ? 200 : 409, { ok: !!r.ok, ...r });
     }
     if (req.method === 'POST' && (url.pathname === '/api/branches/merge' || url.pathname === '/api/branches/delete')) {
       const body = await readBody(req);

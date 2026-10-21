@@ -42,10 +42,10 @@ O engine e o bridge aceitam `resumeId` (vira `--resume-id`), mas um **teste real
 ### Memória / RAG vetorial (upgrade opcional)
 A **memória léxica (FTS5)** já está implementada (veja acima) — sem dependência nova. O upgrade para **RAG vetorial** (busca semântica) é opcional e precisa de: `npm i sqlite-vec` (binários prontos, carregado no `better-sqlite3`) **mais um provedor de embeddings** (um modelo local pesado, ex.: `@xenova/transformers`, ou uma API de embeddings com chave) para gerar os vetores — o kiro-cli não expõe embeddings. Enquanto não houver provedor de embeddings, o FTS5 cobre o caso de busca no histórico.
 
-### Git worktree por agente + auto-commit + PR
-- **Worktree:** cada etapa roda numa worktree isolada (`git worktree add`) em vez da pasta única — habilita paralelismo sem colisão. Dá para fazer com `git` cru (o bridge já roda `git init`), sem dependência nova. É uma mudança estrutural no `cwd` por run.
-- **Auto-commit:** após uma etapa verde, `git add -A && git commit` na worktree (requer `user.name/email` do git configurados).
-- **PR automático:** `POST` na API do GitHub (`/repos/{owner}/{repo}/pulls`) com o diff da branch. **Pré-requisito:** `GITHUB_TOKEN` (PAT com escopo de PR) no ambiente do bridge.
+### Git: auto-commit (IMPLEMENTADO) + worktree + PR
+- **Auto-commit — IMPLEMENTADO (opt-in):** marque **"Auto-commit após cada etapa"** nas configurações. Quando uma etapa conclui com sucesso, o bridge faz `git add -A && git commit` na pasta do projeto (que já é um repo git), com identidade git **local** (nunca toca a config global); "nada a commitar" conta como sucesso e **nunca falha o run** (try/catch, evento `bridge/commit` no stream). Verificado por teste real (run grava arquivo → commit nasce no repo do projeto).
+- **Worktree por agente (próximo):** cada etapa numa worktree isolada (`git worktree add`) para paralelismo sem colisão — mudança estrutural no `cwd` por run (sem dependência nova).
+- **PR automático (próximo):** `POST` na API do GitHub (`/repos/{owner}/{repo}/pulls`) com o diff da branch. **Pré-requisito:** `GITHUB_TOKEN` no ambiente do bridge.
 
 ### Sandbox de execução (pentest/labs)
 Não existe `--sandbox` nativo no `kiro-cli chat` (só `--cloud`, que roda na nuvem do Kiro). Para isolamento local de execuções ofensivas/descartáveis, rode a etapa dentro de um container (Docker) ou microVM (microsandbox/E2B) — a bridge pode fazer `spawn` do `kiro-cli` dentro do container. **Pré-requisito:** Docker (ou runtime de microVM) instalado. Use com o `pentest-operator` e a toolbox MCP (HexStrike) em rede isolada.

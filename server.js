@@ -154,6 +154,21 @@ function ensureProjectRepo(dir) {
   });
 }
 
+/** Commit the project's working tree after a successful step (opt-in). Uses a per-command local identity so it never touches global
+ *  git config; "nothing to commit" counts as success; never rejects — a failed commit must not fail the run. */
+function autoCommit(dir, message) {
+  if (gitMissing) return Promise.resolve({ ok: false, error: 'git indisponível' });
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: gitCeiling() };
+  const gitRun = args => new Promise(resolve => execFile('git', args, { cwd: dir, windowsHide: true, timeout: 20000, env }, (err, stdout, stderr) => resolve({ err, out: String(stdout || '') + String(stderr || '') })));
+  return gitRun(['add', '-A']).then(a => {
+    if (a.err) return { ok: false, error: a.err.message };
+    return gitRun(['-c', 'user.name=squad-code-kiro', '-c', 'user.email=squad-code-kiro@local', 'commit', '-m', String(message || 'etapa').slice(0, 500)]).then(c => {
+      const nothing = /nothing to commit|working tree clean|nada (a|para) (submeter|comitar|commitar)/i.test(c.out);
+      return { ok: !c.err || nothing, nothing, error: c.err && !nothing ? c.out.slice(-300) : null };
+    });
+  }).catch(e => ({ ok: false, error: e.message }));
+}
+
 /** Folder of a project under PROJECTS_DIR; the name is a plain slug, so it cannot leave the root. */
 function projectDir(name) {
   const folder = String(name || '').trim();
@@ -321,6 +336,7 @@ function validateRunOptions(o = {}) {
 
   // Kiro engine options: map the UI's fields to the kiro-cli flags. `agent` selects a native Kiro agent (.kiro/agents/<name>).
   // `trustTools` (optional array) restricts trust; omitted => trust-all (headless squad execution needs tools without prompts).
+  out.autoCommit = o.autoCommit === true;
   out.kiro = kiroEngine.validateKiroOptions({
     agent: typeof o.agent === 'string' && o.agent.trim() ? o.agent.trim() : undefined,
     model: o.model || undefined,
@@ -437,6 +453,9 @@ async function runWithRotation(run, resolved, kiroArgs, opts) {
     if (attemptResult.ok) {
       if (picked) { try { store.markApiKeyOk(picked.id, credits); } catch {} }
       run.credits += credits;
+      if (opts.autoCommit && opts.projectRun && !run.cancelled && !run.timedOut) {
+        try { const c = await autoCommit(opts.cwd, `[squad] ${run.label || 'etapa'}`); pushEvent(run, { type: 'bridge', subtype: 'commit', ok: !!c.ok, nothing: !!c.nothing, error: c.error || null }); } catch {}
+      }
       return finalizeRun(run, attemptResult);
     }
 
